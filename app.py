@@ -49,7 +49,7 @@ def main():
 
         if not recent.empty:
             if site_col in recent.columns and not recent.empty:
-            site_stats = recent.groupby(site_col).agg(
+    site_stats = recent.groupby(site_col).agg(
                 Referrals=('Referral Date', 'count'),
                 ICFs=('Signed ICF', 'sum'),
                 Avg_Contact_Days=('Time to Contact (Days)', 'mean'),
