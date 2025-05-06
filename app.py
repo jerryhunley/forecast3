@@ -30,7 +30,33 @@ def main():
         if referrals.empty:
             st.info("Not enough recent data to display conversion trends.")
         else:
-            st.success("Placeholder for time-to-contact and conversion analysis")
+            st.subheader("📈 Time to Contact + Recent Conversion Trends")
+        referrals['Call Date'] = pd.to_datetime(referrals['Call Date'], errors='coerce')
+        referrals['Time to Contact (Days)'] = (referrals['Call Date'] - referrals['Referral Date']).dt.days
+
+        recent_window = st.slider("Recent Window (days)", 7, 90, 30)
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_window)
+        recent = referrals[referrals['Referral Date'] >= cutoff]
+
+        if not recent.empty:
+            site_stats = recent.groupby('Site Number').agg(
+                Referrals=('Referral Date', 'count'),
+                ICFs=('Signed ICF', 'sum'),
+                Avg_Contact_Days=('Time to Contact (Days)', 'mean'),
+                Updates=('Lead Stage History', lambda x: x.str.count(';').sum())
+            ).reset_index()
+            site_stats['ICF Rate (%)'] = (site_stats['ICFs'] / site_stats['Referrals'] * 100).round(1)
+            site_stats['Score'] = (
+                site_stats['ICF Rate (%)'] * 0.6 +
+                (1 / (site_stats['Avg_Contact_Days'] + 1)) * 40 +
+                (site_stats['Updates'] / site_stats['Referrals']).fillna(0) * 10
+            ).round(1)
+            site_stats['Grade'] = pd.cut(site_stats['Score'], bins=[0,50,60,70,80,90,100], labels=['F','D','C','B','A','A+'])
+
+            st.markdown("### 🏅 Recent Site Conversion Performance")
+            st.dataframe(site_stats[['Site Number', 'Referrals', 'ICFs', 'ICF Rate (%)', 'Avg_Contact_Days', 'Updates', 'Score', 'Grade']], use_container_width=True)
+        else:
+            st.info("Not enough recent data to calculate conversion metrics.")
 
         st.header("📊 Study-Wide Forecast Summary")
         total_icf_goal = st.number_input("Total ICF Goal for Study", min_value=1, value=150)
