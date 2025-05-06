@@ -31,8 +31,8 @@ def main():
             st.info("Not enough recent data to display conversion trends.")
         else:
             st.subheader("📈 Time to Contact + Recent Conversion Trends")
-        referrals['Call Date'] = pd.to_datetime(referrals['Call Date'], errors='coerce')
-        referrals['Time to Contact (Days)'] = (referrals['Call Date'] - referrals['Referral Date']).dt.days
+        
+        
 
         recent_window = st.slider("Recent Window (days)", 7, 90, 30)
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_window)
