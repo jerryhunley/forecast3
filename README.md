@@ -1,9 +1,8 @@
 # Recruitment Forecast App
 
-Forecast clinical trial ICF projections using referral funnel data.
+Streamlit app to forecast clinical trial recruitment.
 
 ## Run
-
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
