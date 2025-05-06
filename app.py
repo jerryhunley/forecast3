@@ -26,11 +26,20 @@ def main():
         sites = pd.read_csv(uploaded_sites)
         referrals['Signed ICF'] = referrals['Lead Stage History'].fillna('').str.contains('Signed ICF').astype(int)
 
-        st.subheader("📈 Time to Contact + Recent Conversion Trends")
+        
         if referrals.empty:
             st.info("Not enough recent data to display conversion trends.")
         else:
             st.subheader("📈 Time to Contact + Recent Conversion Trends")
+# Standardize site column
+        site_col = None
+        for col in referrals.columns:
+            if 'site' in col.lower() and 'number' in col.lower():
+                site_col = col
+                break
+        if not site_col:
+            st.warning("Could not find a column for 'Site Number'.")
+            return
         
         
 
@@ -39,7 +48,8 @@ def main():
         recent = referrals[referrals['Referral Date'] >= cutoff]
 
         if not recent.empty:
-            site_stats = recent.groupby('Site Number').agg(
+            if site_col in recent.columns and not recent.empty:
+            site_stats = recent.groupby(site_col).agg(
                 Referrals=('Referral Date', 'count'),
                 ICFs=('Signed ICF', 'sum'),
                 Avg_Contact_Days=('Time to Contact (Days)', 'mean'),
