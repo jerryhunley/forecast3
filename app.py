@@ -297,6 +297,7 @@ def score_sites(_site_metrics_df, weights):
                  def assign_grade_fallback(score_value): 
                      if pd.isna(score_value): return 'N/A'
                      score_value = round(score_value)
+                     # --- CORRECTED Multi-line Fallback Logic ---
                      if score_value >= 90: 
                          return 'A' 
                      elif score_value >= 80: 
@@ -307,6 +308,7 @@ def score_sites(_site_metrics_df, weights):
                          return 'D'
                      else: 
                          return 'F'
+                     # --- END CORRECTION ---
                  site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_grade_fallback)
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A') 
         elif len(site_metrics_df_indexed) == 1: 
