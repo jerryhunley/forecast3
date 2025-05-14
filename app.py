@@ -225,31 +225,41 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
         st.error(f"Error calculating site metrics: {e}"); st.exception(e)
         return pd.DataFrame()
 
+# @st.cache_data # Intentionally commented out for now to ensure fresh runs
 def score_sites(_site_metrics_df, weights):
-    if _site_metrics_df is None or _site_metrics_df.empty: return pd.DataFrame()
+    """Applies normalization and weighting to score sites using percentile grading."""
+    if _site_metrics_df is None or _site_metrics_df.empty: 
+        return pd.DataFrame() # Return empty if no input
     try: 
         site_metrics_df = _site_metrics_df.copy() 
-        if 'Site' not in site_metrics_df.columns:
-             if site_metrics_df.index.name == 'Site': site_metrics_df.reset_index(inplace=True) # Fixed: No direct assignment needed here, reset_index(inplace=True) modifies directly
-             else: return pd.DataFrame()
         
-        site_metrics_df_indexed = site_metrics_df.set_index('Site')
+        # Ensure 'Site' is a column, not an index, for consistent processing initially
+        if site_metrics_df.index.name == 'Site':
+            site_metrics_df.reset_index(inplace=True)
+            
+        if 'Site' not in site_metrics_df.columns:
+            st.error("Critical Error in score_sites: 'Site' column is missing and not in index.")
+            return pd.DataFrame() # Cannot proceed without Site identifier
+        
+        site_metrics_df_indexed = site_metrics_df.set_index('Site') # Now set index for processing
         
         metrics_to_scale = list(weights.keys())
         lower_is_better = ["Avg TTC (Days)", "Site Screen Fail %"]
 
+        # Create a copy for scaling to avoid SettingWithCopyWarning 
         scaled_metrics_data = site_metrics_df_indexed.reindex(columns=metrics_to_scale).copy()
 
         for col in metrics_to_scale:
             if col not in scaled_metrics_data.columns:
+                # This case should ideally not happen if weights match available metrics
                 scaled_metrics_data[col] = 0 if col not in lower_is_better else np.nan 
             
             if col in lower_is_better:
                 max_val = scaled_metrics_data[col].max()
                 fill_val = (max_val + 1) if pd.notna(max_val) and max_val > 0 else 999 
-                scaled_metrics_data[col] = scaled_metrics_data[col].fillna(fill_val) # Changed from inplace
+                scaled_metrics_data[col] = scaled_metrics_data[col].fillna(fill_val)
             else: 
-                scaled_metrics_data[col] = scaled_metrics_data[col].fillna(0) # Changed from inplace
+                scaled_metrics_data[col] = scaled_metrics_data[col].fillna(0)
         
         scaled_metrics_display = pd.DataFrame(index=scaled_metrics_data.index) 
         if not scaled_metrics_data.empty and len(scaled_metrics_data) > 0: 
@@ -257,30 +267,32 @@ def score_sites(_site_metrics_df, weights):
                  if col in scaled_metrics_data.columns: 
                      min_val = scaled_metrics_data[col].min(); max_val = scaled_metrics_data[col].max()
                      if min_val == max_val: 
-                         scaled_metrics_display[col] = 0.5 
+                         scaled_metrics_display[col] = 0.5 # Neutral score if no variance
                      elif pd.notna(min_val) and pd.notna(max_val) and (max_val - min_val) != 0 : 
                          scaler = MinMaxScaler()
                          scaled_values = scaler.fit_transform(scaled_metrics_data[[col]]) 
                          scaled_metrics_display[col] = scaled_values.flatten() 
                      else: 
-                          scaled_metrics_display[col] = 0.5
+                          scaled_metrics_display[col] = 0.5 # Fallback for problematic scaling
                  else: scaled_metrics_display[col] = 0.5 
             
             for col in lower_is_better: 
                 if col in scaled_metrics_display.columns: 
                     scaled_metrics_display[col] = 1 - scaled_metrics_display[col]
         
-        site_metrics_df_indexed['Score_Raw'] = 0.0; total_weight_applied = 0.0
-        for metric, weight_pct in weights.items(): 
-             weight = weight_pct / 100.0 
+        site_metrics_df_indexed['Score_Raw'] = 0.0
+        total_weight_applied = 0.0
+        for metric, weight_pct in weights.items(): # Assuming weights from sidebar are 0-100
+             weight_decimal = weight_pct / 100.0 # Convert percentage to decimal
              if metric in scaled_metrics_display.columns: 
-                 # Ensure the column exists before trying to fillna
-                 if metric in scaled_metrics_display:
-                      scaled_metrics_display[metric] = scaled_metrics_display[metric].fillna(0.5)
-                      site_metrics_df_indexed['Score_Raw'] += scaled_metrics_display[metric] * weight 
-                 else: # If for some reason scaled_metrics_display doesn't have the column
-                      site_metrics_df_indexed['Score_Raw'] += 0.5 * weight # Add neutral contribution
-                 total_weight_applied += abs(weight) 
+                 # Ensure the column exists in scaled_metrics_display before trying to access it
+                 current_scaled_metric = scaled_metrics_display.get(metric)
+                 if current_scaled_metric is not None:
+                     site_metrics_df_indexed['Score_Raw'] += current_scaled_metric.fillna(0.5) * weight_decimal
+                     total_weight_applied += abs(weight_decimal) 
+                 else: # Should not happen if logic is correct
+                     site_metrics_df_indexed['Score_Raw'] += 0.5 * weight_decimal # Neutral contribution
+                     total_weight_applied += abs(weight_decimal)
                                                      
         if total_weight_applied > 0: 
             site_metrics_df_indexed['Score'] = (site_metrics_df_indexed['Score_Raw'] / total_weight_applied) * 100
@@ -299,7 +311,7 @@ def score_sites(_site_metrics_df, weights):
                  def assign_grade_fallback(score_value): 
                      if pd.isna(score_value): return 'N/A'
                      score_value = round(score_value)
-                     # --- CORRECTED Multi-line Fallback Logic ---
+                     # --- Corrected Multi-line Fallback Logic ---
                      if score_value >= 90: 
                          return 'A' 
                      elif score_value >= 80: 
@@ -310,7 +322,7 @@ def score_sites(_site_metrics_df, weights):
                          return 'D'
                      else: 
                          return 'F'
-                     # --- END CORRECTION ---
+                     # --- End Correction ---
                  site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_grade_fallback)
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A') 
         elif len(site_metrics_df_indexed) == 1: 
@@ -319,15 +331,22 @@ def score_sites(_site_metrics_df, weights):
                 score_value = round(score_value)
                 if score_value >= 90: return 'A'; elif score_value >= 80: return 'B'; elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'; else: return 'F'
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_single_site_grade)
-        else: site_metrics_df_indexed['Grade'] = []
+        else: 
+            site_metrics_df_indexed['Grade'] = None # Assign None if no sites to grade
         
-        final_df = site_metrics_df_indexed.reset_index()
-        final_df.sort_values('Score', ascending=False, inplace=True) # Fixed: No direct assignment needed here
-        return final_df 
+        final_df_output = site_metrics_df_indexed.reset_index()
+        # Ensure Score column exists before sorting
+        if 'Score' in final_df_output.columns:
+            final_df_output.sort_values('Score', ascending=False, inplace=True)
+        return final_df_output
     except Exception as e: 
         st.error(f"Error during Site Scoring: {e}"); st.exception(e)
-        return _site_metrics_df.reset_index() if _site_metrics_df is not None and not _site_metrics_df.empty else pd.DataFrame()
-
+        # Return original metrics df if scoring fails mid-way, ensuring 'Site' is a column
+        if _site_metrics_df is not None and not _site_metrics_df.empty:
+             if _site_metrics_df.index.name == 'Site':
+                 return _site_metrics_df.reset_index()
+             return _site_metrics_df
+        return pd.DataFrame()
 
 # --- NEW Helper for Projection Rates ---
 # @st.cache_data # Temporarily removed for easier debugging of this logic
