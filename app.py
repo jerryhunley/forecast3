@@ -555,8 +555,8 @@ manual_proj_conv_rates_sidebar = {}; use_rolling_flag_sidebar = False; rolling_w
 _effective_projection_conv_rates = {}; goal_icf_count_sidebar = 100
 
 with st.sidebar:
-    st.header("⚙️ Setup")
-    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
+    st.header("⚙️ Setup")
+    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"],key="referral_uploader_main")
     uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader_main") 
     st.divider()
     with st.expander("Historical Ad Spend"):
