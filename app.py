@@ -375,11 +375,16 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
         base_hist_col = pof_hist_col if pof_hist_col and pof_hist_col in hist_counts.columns else "Total Qualified Referrals"
         
         valid_historical_rates_found = False
-        for i in range(len(ordered_stages) - 1):
-            stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]
+        # Ensure we only calculate for the stages present in manual_rates_sidebar keys (core projection stages)
+        for rate_key in manual_rates_sidebar.keys():
+            try:
+                stage_from, stage_to = rate_key.split(" -> ")
+            except ValueError:
+                calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
+                continue
+
             actual_col_from = base_hist_col if stage_from == ordered_stages[0] else reached_stage_cols_map_hist.get(stage_from)
             col_to_cleaned_name = reached_stage_cols_map_hist.get(stage_to)
-            rate_key = f"{stage_from} -> {stage_to}"
             
             if actual_col_from in hist_counts.columns and col_to_cleaned_name in hist_counts.columns:
                     monthly_rate = (hist_counts[col_to_cleaned_name] / hist_counts[actual_col_from].replace(0, np.nan)).fillna(0)
@@ -409,15 +414,17 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
         if sidebar_display_area: sidebar_display_area.error(f"Error calculating rolling rates: {e}"); sidebar_display_area.exception(e)
         return manual_rates_sidebar, "Manual (Error in Rolling)"
 
+
 @st.cache_data 
 def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
     default_return_tuple = pd.DataFrame(), np.nan, "N/A", "N/A", pd.DataFrame() 
 
     if _processed_df is None or _processed_df.empty: return default_return_tuple
     
-    required_keys = ['horizon', 'spend_dict', 'cpqr_dict', 'final_conv_rates', 'goal_icf'] 
+    # Ensure 'site_performance_data' is in required_keys for the new logic
+    required_keys = ['horizon', 'spend_dict', 'cpqr_dict', 'final_conv_rates', 'goal_icf', 'site_performance_data'] 
     if not isinstance(projection_inputs, dict) or not all(k in projection_inputs for k in required_keys):
-        st.warning(f"Proj: Missing inputs for projection. Need: {required_keys}. Got: {list(projection_inputs.keys())}")
+        st.warning(f"Proj: Missing inputs. Need: {required_keys}. Got: {list(projection_inputs.keys())}")
         return default_return_tuple
         
     processed_df = _processed_df.copy(); horizon = projection_inputs['horizon']
@@ -425,6 +432,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     assumed_cpqr_dict = projection_inputs['cpqr_dict'] 
     final_projection_conv_rates = projection_inputs['final_conv_rates'] 
     goal_total_icfs = projection_inputs['goal_icf']
+    site_performance_data = projection_inputs['site_performance_data']
     
     avg_actual_lag_days_for_display = np.nan 
     start_stage_for_lag_calc = ordered_stages[0]; end_stage_for_lag_calc = "Signed ICF"; 
@@ -541,8 +549,6 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         display_df['Projected_CPICF_Cohort_Source'] = cpicf_display_series
 
         # --- Site Level Breakdown Logic ---
-        site_performance_data = projection_inputs.get('site_performance_data', pd.DataFrame()) # Get from inputs
-
         if 'Site' in _processed_df.columns and not _processed_df['Site'].empty and \
            ordered_stages and len(ordered_stages) > 0 and ts_col_map.get(ordered_stages[0]) and \
            ts_col_map.get(ordered_stages[0]) in _processed_df.columns:
@@ -558,19 +564,23 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             
             # Calculate overall Qual to ICF rate (as a general fallback if site-specific is not available)
             overall_qual_to_icf_rate_calc = 1.0
-            try:
-                icf_stage_idx = ordered_stages.index(icf_stage_name)
-                temp_rate_prod = 1.0
-                for i_rate in range(icf_stage_idx): 
-                    if i_rate + 1 < len(ordered_stages):
-                        stage_from_key = ordered_stages[i_rate]
-                        stage_to_key = ordered_stages[i_rate + 1]
-                        rate_val = final_projection_conv_rates.get(f"{stage_from_key} -> {stage_to_key}", 0)
-                        temp_rate_prod *= rate_val
-                    else: break 
-                overall_qual_to_icf_rate_calc = temp_rate_prod
-            except ValueError: overall_qual_to_icf_rate_calc = 0.0
-
+            if ordered_stages and icf_stage_name and icf_stage_name in ordered_stages:
+                try:
+                    qual_stage_index_for_overall_rate = 0 
+                    icf_stage_idx_for_overall_rate = ordered_stages.index(icf_stage_name)
+                    temp_rate_prod = 1.0
+                    # Iterate from the first stage up to the stage *before* Signed ICF
+                    for i_rate in range(qual_stage_index_for_overall_rate, icf_stage_idx_for_overall_rate): 
+                        if i_rate + 1 < len(ordered_stages): # Ensure there's a next stage
+                            stage_from_key = ordered_stages[i_rate]
+                            stage_to_key = ordered_stages[i_rate + 1]
+                            rate_val = final_projection_conv_rates.get(f"{stage_from_key} -> {stage_to_key}", 0)
+                            temp_rate_prod *= rate_val
+                        else: # Should not happen if ICF is not the very first stage
+                            break 
+                    qual_to_icf_overall_rate_calc = temp_rate_prod
+                except ValueError: qual_to_icf_overall_rate_calc = 0.0
+            else: qual_to_icf_overall_rate_calc = 0.0
 
             all_sites = sorted(_processed_df['Site'].unique())
             site_data_collector = {} 
@@ -589,14 +599,17 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                     month_str_cohort_start = start_month_period.strftime('%Y-%m')
                     site_data_collector[site_name][(month_str_cohort_start, 'Projected Qual. Referrals')] += round(site_proj_qual_referrals_cohort)
                     
-                    # Use site-specific "Qual -> ICF %" if available, else fallback
-                    site_specific_icf_rate = overall_qual_to_icf_rate_calc # Default to overall
-                    if not site_performance_data.empty and site_name in site_performance_data.index:
-                        rate_from_site_perf = site_performance_data.loc[site_name, 'Qual -> ICF %']
-                        if pd.notna(rate_from_site_perf) and rate_from_site_perf > 0:
-                            site_specific_icf_rate = rate_from_site_perf
+                    # --- MODIFIED: Use site-specific rate ---
+                    site_specific_icf_rate_to_use = overall_qual_to_icf_rate_calc # Default
+                    if not site_performance_data.empty and 'Site' in site_performance_data.columns and site_name in site_performance_data['Site'].values:
+                        site_perf_row = site_performance_data[site_performance_data['Site'] == site_name]
+                        if not site_perf_row.empty and 'Qual -> ICF %' in site_perf_row.columns:
+                            rate_from_site_perf = site_perf_row['Qual -> ICF %'].iloc[0]
+                            if pd.notna(rate_from_site_perf) and rate_from_site_perf > 0:
+                                site_specific_icf_rate_to_use = rate_from_site_perf
+                    # --- END MODIFICATION ---
                     
-                    site_proj_icfs_generated_this_cohort = site_proj_qual_referrals_cohort * site_specific_icf_rate
+                    site_proj_icfs_generated_this_cohort = site_proj_qual_referrals_cohort * site_specific_icf_rate_to_use # Use the determined rate
                     
                     if site_proj_icfs_generated_this_cohort > 0:
                         full_lag_m_site = int(np.floor(current_lag_days_to_use / days_in_avg_month))
@@ -640,17 +653,23 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
 
 
 # --- Streamlit UI ---
+# (Session state initializations from your Turn 79 code)
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
 if 'referral_data_processed' not in st.session_state: st.session_state.referral_data_processed = None
 if 'funnel_definition' not in st.session_state: st.session_state.funnel_definition = None
 if 'ordered_stages' not in st.session_state: st.session_state.ordered_stages = None
 if 'ts_col_map' not in st.session_state: st.session_state.ts_col_map = None
-if 'site_metrics_calculated' not in st.session_state: st.session_state.site_metrics_calculated = pd.DataFrame() # Initialize
+if 'site_metrics_calculated' not in st.session_state: st.session_state.site_metrics_calculated = pd.DataFrame()
 
-
-ad_spend_input_dict = {}; weights_normalized = {}
-proj_horizon_sidebar = 12; proj_spend_dict_sidebar = {}; proj_cpqr_dict_sidebar = {}
-manual_proj_conv_rates_sidebar = {}; use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3
+# (Sidebar variable initializations from your Turn 79 code)
+ad_spend_input_dict = {}
+weights_normalized = {}
+proj_horizon_sidebar = 12
+proj_spend_dict_sidebar = {}
+proj_cpqr_dict_sidebar = {}
+manual_proj_conv_rates_sidebar = {} 
+use_rolling_flag_sidebar = False
+rolling_window_months_sidebar = 3
 goal_icf_count_sidebar = 100 
 
 with st.sidebar:
@@ -922,24 +941,34 @@ if st.session_state.data_processed_successfully:
             if display_site_df_main.index.name == 'Site':
                 display_site_df_main.reset_index(inplace=True)
             
-            # Prepare a dict to configure editable columns for data_editor
-            # This step might not be strictly necessary if data types are already suitable
-            # However, st.data_editor handles type inference.
+            # Prepare for data_editor - ensure numeric columns are suitable for editing as numbers
+            # For MultiIndex columns, st.data_editor might have specific behaviors.
+            # It's often easier to work with if the dataframe is "flat" before passing to data_editor.
+            # However, let's try with the MultiIndex first as it's already constructed.
+            # `st.data_editor` can infer types, but we might want to ensure they are int/float for editing.
+
+            # Exclude 'Grand Total' row from being directly part of the data_editor if it's the index
+            # If 'Site' is a column, filter out 'Grand Total' before passing to data_editor
+            editable_sites_df = display_site_df_main[display_site_df_main['Site'] != 'Grand Total'] if 'Site' in display_site_df_main.columns else display_site_df_main[display_site_df_main.index != 'Grand Total']
+            total_row_df_display = display_site_df_main[display_site_df_main['Site'] == 'Grand Total'] if 'Site' in display_site_df_main.columns else display_site_df_main.loc[['Grand Total']]
             
-            # For now, Grand Total row might be editable; we can address disabling it later if needed
             edited_site_level_df = st.data_editor(
-                display_site_df_main, 
+                editable_sites_df, 
                 use_container_width=True,
-                num_rows="dynamic", # Allows adding/deleting rows if needed, or can be fixed
-                key="site_level_editor"
+                key="site_level_editor",
+                num_rows="dynamic" # Can be set to fixed if sites are predefined
             )
-            # Note: edited_site_level_df contains the user's edits. 
-            # For this step, we are not yet feeding these edits back into main calculations.
+            # Display the Grand Total row separately, non-editable
+            if not total_row_df_display.empty:
+                st.caption("Totals (based on initial calculation, not live edits):")
+                st.dataframe(total_row_df_display.style.format("{:,.0f}", na_rep='0'), use_container_width=True)
+
 
             try:
-                # Download the (potentially) edited data
+                # Option to download the potentially edited data (from the editor) 
+                # or the original calculated data (display_site_df_main)
                 csv_site_proj = edited_site_level_df.to_csv(index=False).encode('utf-8') 
-                st.download_button(label="Download Site Projections", data=csv_site_proj, file_name='site_level_projections.csv', mime='text/csv', key='dl_site_proj_main')
+                st.download_button(label="Download Edited Site Projections", data=csv_site_proj, file_name='edited_site_level_projections.csv', mime='text/csv', key='dl_edited_site_proj_main')
             except Exception as e:
                 st.warning(f"Download button error for site projections: {e}")
         else:
