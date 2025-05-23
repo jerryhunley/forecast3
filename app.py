@@ -351,12 +351,14 @@ def score_sites(_site_metrics_df, weights):
 # --- MODIFIED: determine_effective_projection_rates function ---
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map, 
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
-                                          # --- NEW: Pass inter_stage_lags ---
                                           inter_stage_lags_for_maturity, 
                                           sidebar_display_area=None): 
     
     MIN_DENOMINATOR_FOR_RATE_CALC = 5 
-    DEFAULT_MATURITY_DAYS = 45 # Default if a specific lag for a stage is not found
+    DEFAULT_MATURITY_DAYS = 45 
+    # --- NEW: Parameters for less aggressive maturity calculation ---
+    MATURITY_LAG_MULTIPLIER = 1.5 
+    MIN_EFFECTIVE_MATURITY_DAYS = 20 # Ensure maturity is at least this many days
 
     if _processed_df is None or _processed_df.empty: 
         if sidebar_display_area: sidebar_display_area.caption("Using manual rates (No historical data for rolling).")
@@ -370,28 +372,24 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     method_description = "Manual (Error or No History for Rolling)"
     substitutions_made_log = [] 
     
-    # --- NEW: Dynamically determine maturity periods based on 2x average inter-stage lags ---
     MATURITY_PERIODS_DAYS = {}
-    if inter_stage_lags_for_maturity: # Check if it's not None or empty
-        for rate_key_for_lag in manual_rates_sidebar.keys(): # Use the same keys as projection rates
-            # The lag relevant for maturity is the lag *to complete the 'rate_key_for_lag' step*
-            # This means we need the lag of the segment that *produces the outcome* of the rate_key.
-            # E.g., for "Stage A -> Stage B", the relevant lag is AvgLag(A->B).
-            # The `inter_stage_lags_for_maturity` dictionary keys are already in "Stage X -> Stage Y" format.
-            
+    if inter_stage_lags_for_maturity:
+        for rate_key_for_lag in manual_rates_sidebar.keys():
             avg_lag_for_key = inter_stage_lags_for_maturity.get(rate_key_for_lag)
             
             if pd.notna(avg_lag_for_key) and avg_lag_for_key > 0:
-                MATURITY_PERIODS_DAYS[rate_key_for_lag] = round(2 * avg_lag_for_key)
+                calculated_maturity = round(MATURITY_LAG_MULTIPLIER * avg_lag_for_key)
+                # --- MODIFIED: Apply MIN_EFFECTIVE_MATURITY_DAYS ---
+                MATURITY_PERIODS_DAYS[rate_key_for_lag] = max(calculated_maturity, MIN_EFFECTIVE_MATURITY_DAYS)
+                if MATURITY_PERIODS_DAYS[rate_key_for_lag] == MIN_EFFECTIVE_MATURITY_DAYS and calculated_maturity < MIN_EFFECTIVE_MATURITY_DAYS:
+                    substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Calc'd {calculated_maturity}d ({MATURITY_LAG_MULTIPLIER}x{avg_lag_for_key:.1f}d), capped at min {MIN_EFFECTIVE_MATURITY_DAYS}d.")
             else:
-                # If specific lag is not found or not positive, use a default for this key
                 MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
                 substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Avg lag N/A or zero, used default {DEFAULT_MATURITY_DAYS} days.")
-    else: # If inter_stage_lags_for_maturity is not provided or empty, use default for all
+    else: 
         for rate_key_for_lag in manual_rates_sidebar.keys():
             MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
         substitutions_made_log.append(f"Maturity: Inter-stage lags not available, used default {DEFAULT_MATURITY_DAYS} days for all rate calculations.")
-    # --- End NEW: Maturity period determination ---
 
     try:
         if "Submission_Month" not in _processed_df.columns or _processed_df["Submission_Month"].dropna().empty:
@@ -429,14 +427,11 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                 total_denominator = hist_counts[actual_col_from].sum()
                 overall_hist_rate_for_key = (total_numerator / total_denominator) if total_denominator > 0 else np.nan
                 manual_rate_for_key = manual_rates_sidebar.get(rate_key, 0.0)
-                
-                # --- Use the dynamically calculated maturity period for this rate_key ---
                 maturity_days_for_this_rate = MATURITY_PERIODS_DAYS.get(rate_key, DEFAULT_MATURITY_DAYS)
 
                 adjusted_monthly_rates_list = []
                 months_used_for_rate = [] 
                 for month_period in hist_counts.index:
-                    # Check maturity: cohort from 'month_period' must be old enough
                     if month_period.end_time + pd.Timedelta(days=maturity_days_for_this_rate) < pd.Timestamp(datetime.now()):
                         months_used_for_rate.append(month_period)
                         numerator_val = hist_counts.loc[month_period, col_to_cleaned_name]
@@ -453,11 +448,11 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                             rate_for_this_month = numerator_val / denominator_val
                         adjusted_monthly_rates_list.append(rate_for_this_month)
                     else:
-                        substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Excluded (too recent, maturity {maturity_days_for_this_rate} days).")
+                        substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Excluded (too recent, current maturity: {maturity_days_for_this_rate} days).")
                 
                 if not adjusted_monthly_rates_list:
                     calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
-                    substitutions_made_log.append(f"{rate_key}: No mature historical months found, used manual rate.")
+                    substitutions_made_log.append(f"{rate_key}: No mature historical months found (maturity: {maturity_days_for_this_rate}d), used manual rate.")
                     continue
                 
                 adjusted_monthly_rates_series = pd.Series(adjusted_monthly_rates_list, index=pd.PeriodIndex(months_used_for_rate, freq='M'))
@@ -471,24 +466,27 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                         valid_historical_rates_found = True
                     else: 
                         calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
-                        substitutions_made_log.append(f"{rate_key}: Rolling avg empty on mature data, used manual rate.")
+                        substitutions_made_log.append(f"{rate_key}: Rolling avg empty on mature data (maturity: {maturity_days_for_this_rate}d), used manual rate.")
                 else: 
-                    # If not enough mature months for a window, use the average of available mature rates or fallback
                     if not adjusted_monthly_rates_series.empty:
-                        # Fallback to mean of all available mature rates if window calc fails
                         mean_mature_rate = adjusted_monthly_rates_series.mean()
                         calculated_rolling_rates[rate_key] = mean_mature_rate if pd.notna(mean_mature_rate) else manual_rates_sidebar.get(rate_key, 0.0)
-                        substitutions_made_log.append(f"{rate_key}: Window {actual_window_calc} too small or no data; used mean of mature rates or manual. Valid: {pd.notna(mean_mature_rate)}")
+                        substitutions_made_log.append(f"{rate_key}: Window {actual_window_calc} too small for mature data (maturity: {maturity_days_for_this_rate}d); used mean of mature rates or manual. Valid: {pd.notna(mean_mature_rate)}")
                         if pd.notna(mean_mature_rate): valid_historical_rates_found = True
-                    else: # Should be caught by 'if not adjusted_monthly_rates_list'
+                    else:
                          calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
-                         substitutions_made_log.append(f"{rate_key}: No mature data for rolling window, used manual rate.")
+                         substitutions_made_log.append(f"{rate_key}: No mature data for rolling window (maturity: {maturity_days_for_this_rate}d), used manual rate.")
             else: 
                 calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
                 substitutions_made_log.append(f"{rate_key}: Stage columns not in hist data, used manual rate.")
         
         if sidebar_display_area and substitutions_made_log:
             with sidebar_display_area.expander("Rolling Rate Calculation Log (Adjustments & Maturity)", expanded=False):
+                # --- Display Maturity Periods first ---
+                sidebar_display_area.caption("Maturity Periods Applied (Days):")
+                for r_key_disp, mat_days_disp in MATURITY_PERIODS_DAYS.items():
+                    sidebar_display_area.caption(f"- {r_key_disp}: {mat_days_disp} days")
+                sidebar_display_area.caption("--- Substitution/Exclusion Log ---")
                 for log_entry in substitutions_made_log:
                     st.caption(log_entry)
 
