@@ -510,10 +510,15 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         if all_segments_found_and_valid and valid_segments_count == len(projection_segments_for_lag):
             avg_actual_lag_days_for_display = calculated_sum_of_lags
             lag_calculation_method_message = "Using summed inter-stage lags for projection path."
-        else: all_segments_found_and_valid = False
-              lag_calculation_method_message = "Summed inter-stage lag failed. "
-    else: all_segments_found_and_valid = False
-          lag_calculation_method_message = "Inter-stage lags not available. "
+        else: 
+            all_segments_found_and_valid = False
+            # --- CORRECTED INDENTATION on the line below ---
+            lag_calculation_method_message = "Summed inter-stage lag failed. " 
+    else: 
+        all_segments_found_and_valid = False
+        # --- CORRECTED INDENTATION on the line below (and ensure consistent with above fix) ---
+        lag_calculation_method_message = "Inter-stage lags not available. " 
+
     if not all_segments_found_and_valid or pd.isna(avg_actual_lag_days_for_display):
         start_stage_for_overall_lag = ordered_stages[0] if ordered_stages and len(ordered_stages) > 0 else None
         end_stage_for_overall_lag = "Signed ICF"; overall_lag_calc_val = np.nan
@@ -524,11 +529,15 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 overall_lag_calc_val = calculate_avg_lag_generic(processed_df, ts_col_start_overall, ts_col_end_overall)
         if pd.notna(overall_lag_calc_val):
             avg_actual_lag_days_for_display = overall_lag_calc_val
-            lag_calculation_method_message += "Used historical overall lag (first funnel stage to ICF)."
-        else: avg_actual_lag_days_for_display = 30.0
-              lag_calculation_method_message += "Used default lag (30 days)."
-    if pd.isna(avg_actual_lag_days_for_display): avg_actual_lag_days_for_display = 30.0
-                                                  lag_calculation_method_message = "Critical Lag Error: All methods failed. Used default 30 days."
+            lag_calculation_method_message += "Used historical overall lag (first funnel stage to ICF)." # Appends to previous message
+        else: 
+            avg_actual_lag_days_for_display = 30.0 # Default lag if overall also fails
+            lag_calculation_method_message += "Used default lag (30 days)." # Appends to previous message
+            
+    if pd.isna(avg_actual_lag_days_for_display): # Final safety net
+        avg_actual_lag_days_for_display = 30.0
+        lag_calculation_method_message = "Critical Lag Error: All methods failed. Used default 30 days."
+
     lpi_date_str = "Goal Not Met"; ads_off_date_str = "N/A"; site_level_projections_df = pd.DataFrame() 
     try:
         last_historical_month = processed_df["Submission_Month"].max() if "Submission_Month" in processed_df and not processed_df["Submission_Month"].empty else pd.Period(datetime.now(), freq='M') - 1
@@ -556,7 +565,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             if stage_to == icf_stage_name_proj: icf_proj_col = proj_col_to; break 
         projection_results = pd.DataFrame(index=future_months); projection_results['Projected_ICF_Landed'] = 0.0 
         if not icf_proj_col or icf_proj_col not in projection_cohorts.columns:
-            st.error(f"Critical Error: Projected ICF column ('{icf_proj_col}') not found."); return default_return_tuple[0], default_return_tuple[1], default_return_tuple[2], default_return_tuple[3], default_return_tuple[4], "ICF Proj Col Missing"
+            st.error(f"Critical Error: Projected ICF column ('{icf_proj_col}') not found for main projection path."); return default_return_tuple[0], default_return_tuple[1], default_return_tuple[2], default_return_tuple[3], default_return_tuple[4], "ICF Proj Col Missing"
         current_lag_days_to_use = avg_actual_lag_days_for_display; days_in_avg_month = 30.4375
         for start_month_period in projection_cohorts.index:
             icfs_from_this_cohort = projection_cohorts.loc[start_month_period, icf_proj_col]
@@ -653,15 +662,16 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                     site_level_projections_df = site_level_projections_df_temp.sort_index(axis=1, level=[0,1]) 
                     if not site_level_projections_df.empty:
                         numeric_cols_site_level = []
-                        for col_tuple in site_level_projections_df.columns:
-                            if pd.api.types.is_numeric_dtype(site_level_projections_df[col_tuple]): numeric_cols_site_level.append(col_tuple)
-                        if numeric_cols_site_level:
+                        for col_tuple in site_level_projections_df.columns: # Iterate through MultiIndex tuples
+                            if pd.api.types.is_numeric_dtype(site_level_projections_df[col_tuple]): 
+                                numeric_cols_site_level.append(col_tuple)
+                        if numeric_cols_site_level: # Check if list is not empty
                             total_row_values = site_level_projections_df[numeric_cols_site_level].sum(axis=0)
                             total_row_df = pd.DataFrame([total_row_values], index=["Grand Total"])
                             site_level_projections_df = pd.concat([site_level_projections_df, total_row_df])
         return display_df, avg_actual_lag_days_for_display, lpi_date_str, ads_off_date_str, site_level_projections_df, lag_calculation_method_message
     except Exception as e: 
-        st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e)
+        st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e) # Print full traceback for debugging
         return default_return_tuple[0], default_return_tuple[1], default_return_tuple[2], default_return_tuple[3], default_return_tuple[4], f"Error: {e}"
 
 # --- Streamlit UI ---
