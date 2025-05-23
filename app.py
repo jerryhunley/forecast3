@@ -12,7 +12,10 @@ import traceback
 st.set_page_config(page_title="Recruitment Forecasting Tool", layout="wide")
 st.title("📊 Recruitment Forecasting Tool")
 
-# --- Helper Functions ---
+# --- Helper Functions --- (parse_funnel_definition, parse_datetime_with_timezone, parse_history_string, get_stage_timestamps, preprocess_referral_data, calculate_proforma_metrics, calculate_avg_lag_generic, calculate_overall_inter_stage_lags, calculate_site_metrics, score_sites remain the same as in the previous version you have)
+# ... [UNCHANGED HELPER FUNCTIONS - I will omit them for brevity here, but they should be in your actual file] ...
+# Make sure all helper functions from the previous complete code are present here.
+# I'll paste them back at the end if needed, but for now, let's focus on the changed function.
 
 @st.cache_data 
 def parse_funnel_definition(uploaded_file):
@@ -348,9 +351,12 @@ def score_sites(_site_metrics_df, weights):
 # --- MODIFIED: determine_effective_projection_rates function ---
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map, 
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
+                                          # --- NEW: Pass inter_stage_lags ---
+                                          inter_stage_lags_for_maturity, 
                                           sidebar_display_area=None): 
     
-    MIN_DENOMINATOR_FOR_RATE_CALC = 5 # Threshold for a reliable monthly rate calculation
+    MIN_DENOMINATOR_FOR_RATE_CALC = 5 
+    DEFAULT_MATURITY_DAYS = 45 # Default if a specific lag for a stage is not found
 
     if _processed_df is None or _processed_df.empty: 
         if sidebar_display_area: sidebar_display_area.caption("Using manual rates (No historical data for rolling).")
@@ -362,7 +368,30 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     
     calculated_rolling_rates = {}
     method_description = "Manual (Error or No History for Rolling)"
-    substitutions_made_log = [] # Log substitutions for transparency
+    substitutions_made_log = [] 
+    
+    # --- NEW: Dynamically determine maturity periods based on 2x average inter-stage lags ---
+    MATURITY_PERIODS_DAYS = {}
+    if inter_stage_lags_for_maturity: # Check if it's not None or empty
+        for rate_key_for_lag in manual_rates_sidebar.keys(): # Use the same keys as projection rates
+            # The lag relevant for maturity is the lag *to complete the 'rate_key_for_lag' step*
+            # This means we need the lag of the segment that *produces the outcome* of the rate_key.
+            # E.g., for "Stage A -> Stage B", the relevant lag is AvgLag(A->B).
+            # The `inter_stage_lags_for_maturity` dictionary keys are already in "Stage X -> Stage Y" format.
+            
+            avg_lag_for_key = inter_stage_lags_for_maturity.get(rate_key_for_lag)
+            
+            if pd.notna(avg_lag_for_key) and avg_lag_for_key > 0:
+                MATURITY_PERIODS_DAYS[rate_key_for_lag] = round(2 * avg_lag_for_key)
+            else:
+                # If specific lag is not found or not positive, use a default for this key
+                MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
+                substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Avg lag N/A or zero, used default {DEFAULT_MATURITY_DAYS} days.")
+    else: # If inter_stage_lags_for_maturity is not provided or empty, use default for all
+        for rate_key_for_lag in manual_rates_sidebar.keys():
+            MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
+        substitutions_made_log.append(f"Maturity: Inter-stage lags not available, used default {DEFAULT_MATURITY_DAYS} days for all rate calculations.")
+    # --- End NEW: Maturity period determination ---
 
     try:
         if "Submission_Month" not in _processed_df.columns or _processed_df["Submission_Month"].dropna().empty:
@@ -371,7 +400,7 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
 
         hist_counts = _processed_df.groupby("Submission_Month").size().to_frame(name="Total Qualified Referrals") 
         reached_stage_cols_map_hist = {}
-        for stage_name in ordered_stages: # Ensure all stages from funnel def are potentially in hist_counts
+        for stage_name in ordered_stages:
             ts_col = ts_col_map.get(stage_name)
             if ts_col and ts_col in _processed_df.columns and pd.api.types.is_datetime64_any_dtype(_processed_df[ts_col]):
                 reached_col_cleaned = f"Reached_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
@@ -380,78 +409,86 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                 hist_counts = hist_counts.join(stage_monthly_counts.rename(reached_col_cleaned), how='left')
         hist_counts = hist_counts.fillna(0)
         
-        # Ensure "Passed Online Form" is handled as the base for the first conversion rate if specified
         pof_hist_col = reached_stage_cols_map_hist.get("Passed Online Form") 
-        # Default base_hist_col for conversion rates is usually the output of POF, often named "Pre-Screener Qualified" or similar.
-        # For rate calculation, 'actual_col_from' will be determined per rate_key.
         
         valid_historical_rates_found = False
-        for rate_key in manual_rates_sidebar.keys(): # Iterate through the defined projection conversion paths
-            try:
-                stage_from_name, stage_to_name = rate_key.split(" -> ")
-            except ValueError: # Should not happen if keys are well-formed
+        for rate_key in manual_rates_sidebar.keys():
+            try: stage_from_name, stage_to_name = rate_key.split(" -> ")
+            except ValueError:
                 calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
                 substitutions_made_log.append(f"{rate_key}: Error parsing stage names, used manual rate.")
                 continue
 
-            # Determine the actual column names in hist_counts for stage_from and stage_to
-            # 'Passed Online Form' is a special case for the *first* step in projections.
-            # For subsequent steps, stage_from_name should directly map to a Reached_{stage_from_name} column.
-            if stage_from_name == "Passed Online Form": # This is the start of the projection funnel
+            if stage_from_name == "Passed Online Form":
                 actual_col_from = pof_hist_col if pof_hist_col and pof_hist_col in hist_counts.columns else "Total Qualified Referrals"
-            else:
-                actual_col_from = reached_stage_cols_map_hist.get(stage_from_name)
-
+            else: actual_col_from = reached_stage_cols_map_hist.get(stage_from_name)
             col_to_cleaned_name = reached_stage_cols_map_hist.get(stage_to_name)
             
             if actual_col_from in hist_counts.columns and col_to_cleaned_name in hist_counts.columns:
-                # Calculate overall historical rate for this specific transition (for fallback)
                 total_numerator = hist_counts[col_to_cleaned_name].sum()
                 total_denominator = hist_counts[actual_col_from].sum()
                 overall_hist_rate_for_key = (total_numerator / total_denominator) if total_denominator > 0 else np.nan
+                manual_rate_for_key = manual_rates_sidebar.get(rate_key, 0.0)
                 
-                manual_rate_for_key = manual_rates_sidebar.get(rate_key, 0.0) # Manual rate for this key
+                # --- Use the dynamically calculated maturity period for this rate_key ---
+                maturity_days_for_this_rate = MATURITY_PERIODS_DAYS.get(rate_key, DEFAULT_MATURITY_DAYS)
 
                 adjusted_monthly_rates_list = []
+                months_used_for_rate = [] 
                 for month_period in hist_counts.index:
-                    numerator_val = hist_counts.loc[month_period, col_to_cleaned_name]
-                    denominator_val = hist_counts.loc[month_period, actual_col_from]
-                    
-                    rate_for_this_month = 0.0 # Default
-                    if denominator_val < MIN_DENOMINATOR_FOR_RATE_CALC:
-                        if pd.notna(overall_hist_rate_for_key):
-                            rate_for_this_month = overall_hist_rate_for_key
-                            substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) too small, used overall hist. rate ({rate_for_this_month*100:.1f}%).")
-                        else:
-                            rate_for_this_month = manual_rate_for_key
-                            substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) too small, overall hist. N/A, used manual rate ({rate_for_this_month*100:.1f}%).")
-                    elif denominator_val > 0:
-                        rate_for_this_month = numerator_val / denominator_val
-                    # If denominator_val is 0 and not < MIN_DENOMINATOR_FOR_RATE_CALC (i.e. MIN_DENOMINATOR_FOR_RATE_CALC is 0), rate is 0.
-                    
-                    adjusted_monthly_rates_list.append(rate_for_this_month)
+                    # Check maturity: cohort from 'month_period' must be old enough
+                    if month_period.end_time + pd.Timedelta(days=maturity_days_for_this_rate) < pd.Timestamp(datetime.now()):
+                        months_used_for_rate.append(month_period)
+                        numerator_val = hist_counts.loc[month_period, col_to_cleaned_name]
+                        denominator_val = hist_counts.loc[month_period, actual_col_from]
+                        rate_for_this_month = 0.0 
+                        if denominator_val < MIN_DENOMINATOR_FOR_RATE_CALC:
+                            if pd.notna(overall_hist_rate_for_key):
+                                rate_for_this_month = overall_hist_rate_for_key
+                                substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, used overall hist. rate ({rate_for_this_month*100:.1f}%). Maturity: {maturity_days_for_this_rate}d.")
+                            else:
+                                rate_for_this_month = manual_rate_for_key
+                                substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, overall N/A, used manual rate ({rate_for_this_month*100:.1f}%). Maturity: {maturity_days_for_this_rate}d.")
+                        elif denominator_val > 0:
+                            rate_for_this_month = numerator_val / denominator_val
+                        adjusted_monthly_rates_list.append(rate_for_this_month)
+                    else:
+                        substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Excluded (too recent, maturity {maturity_days_for_this_rate} days).")
                 
-                adjusted_monthly_rates_series = pd.Series(adjusted_monthly_rates_list, index=hist_counts.index)
+                if not adjusted_monthly_rates_list:
+                    calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
+                    substitutions_made_log.append(f"{rate_key}: No mature historical months found, used manual rate.")
+                    continue
                 
+                adjusted_monthly_rates_series = pd.Series(adjusted_monthly_rates_list, index=pd.PeriodIndex(months_used_for_rate, freq='M'))
                 actual_window_calc = min(rolling_window_sidebar, len(adjusted_monthly_rates_series))
-                if actual_window_calc > 0:
+                
+                if actual_window_calc > 0 and not adjusted_monthly_rates_series.empty:
                     rolling_avg_rate = adjusted_monthly_rates_series.rolling(window=actual_window_calc, min_periods=1).mean()
                     if not rolling_avg_rate.empty:
                         latest_rolling_rate = rolling_avg_rate.iloc[-1]
                         calculated_rolling_rates[rate_key] = latest_rolling_rate if pd.notna(latest_rolling_rate) else 0.0
                         valid_historical_rates_found = True
-                    else: # Should not happen if series is not empty and window > 0
+                    else: 
                         calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
-                        substitutions_made_log.append(f"{rate_key}: Rolling avg empty, used manual rate.")
-                else: # Window is 0 (e.g. not enough data for any window)
-                    calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
-                    substitutions_made_log.append(f"{rate_key}: Rolling window 0, used manual rate.")
-            else: # Columns for rate calculation not found in hist_counts
+                        substitutions_made_log.append(f"{rate_key}: Rolling avg empty on mature data, used manual rate.")
+                else: 
+                    # If not enough mature months for a window, use the average of available mature rates or fallback
+                    if not adjusted_monthly_rates_series.empty:
+                        # Fallback to mean of all available mature rates if window calc fails
+                        mean_mature_rate = adjusted_monthly_rates_series.mean()
+                        calculated_rolling_rates[rate_key] = mean_mature_rate if pd.notna(mean_mature_rate) else manual_rates_sidebar.get(rate_key, 0.0)
+                        substitutions_made_log.append(f"{rate_key}: Window {actual_window_calc} too small or no data; used mean of mature rates or manual. Valid: {pd.notna(mean_mature_rate)}")
+                        if pd.notna(mean_mature_rate): valid_historical_rates_found = True
+                    else: # Should be caught by 'if not adjusted_monthly_rates_list'
+                         calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
+                         substitutions_made_log.append(f"{rate_key}: No mature data for rolling window, used manual rate.")
+            else: 
                 calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
-                substitutions_made_log.append(f"{rate_key}: Stage columns not found in hist data, used manual rate.")
+                substitutions_made_log.append(f"{rate_key}: Stage columns not in hist data, used manual rate.")
         
         if sidebar_display_area and substitutions_made_log:
-            with sidebar_display_area.expander("Rolling Rate Calculation Log (Substitutions)", expanded=False):
+            with sidebar_display_area.expander("Rolling Rate Calculation Log (Adjustments & Maturity)", expanded=False):
                 for log_entry in substitutions_made_log:
                     st.caption(log_entry)
 
@@ -460,12 +497,12 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
             return manual_rates_sidebar, "Manual (All Rolling Calcs Failed or Invalid)"
         else: 
             if sidebar_display_area: 
-                sidebar_display_area.markdown("---"); sidebar_display_area.subheader(f"Effective {rolling_window_sidebar}-Mo. Rolling Rates (Adjusted):")
+                sidebar_display_area.markdown("---"); sidebar_display_area.subheader(f"Effective {rolling_window_sidebar}-Mo. Rolling Rates (Adj. & Matured):")
                 for key, val in calculated_rolling_rates.items():
                     if key in manual_rates_sidebar: 
                         sidebar_display_area.text(f"- {key}: {val*100:.1f}%")
                 sidebar_display_area.markdown("---")
-            return calculated_rolling_rates, f"Rolling {rolling_window_sidebar}-Month Avg (Adjusted)"
+            return calculated_rolling_rates, f"Rolling {rolling_window_sidebar}-Month Avg (Adj. & Matured)"
             
     except Exception as e:
         if sidebar_display_area: sidebar_display_area.error(f"Error calculating rolling rates: {e}"); sidebar_display_area.exception(e)
@@ -473,6 +510,7 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
 # --- End MODIFIED: determine_effective_projection_rates function ---
 
 
+# --- calculate_projections function (ensure it's the corrected version from previous step) ---
 @st.cache_data 
 def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
     default_return_tuple = pd.DataFrame(), np.nan, "N/A", "N/A", pd.DataFrame(), "N/A" 
@@ -502,7 +540,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     if inter_stage_lags:
         for stage_from, stage_to in projection_segments_for_lag:
             lag_key = f"{stage_from} -> {stage_to}"; lag_value = inter_stage_lags.get(lag_key)
-            if ts_col_map.get(stage_from) and ts_col_map.get(stage_to):
+            if ts_col_map.get(stage_from) and ts_col_map.get(stage_to): # Check if stages can have TS columns
                 if pd.notna(lag_value):
                     calculated_sum_of_lags += lag_value; valid_segments_count += 1
                 else: all_segments_found_and_valid = False; break 
@@ -512,11 +550,9 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             lag_calculation_method_message = "Using summed inter-stage lags for projection path."
         else: 
             all_segments_found_and_valid = False
-            # --- CORRECTED INDENTATION on the line below ---
             lag_calculation_method_message = "Summed inter-stage lag failed. " 
     else: 
         all_segments_found_and_valid = False
-        # --- CORRECTED INDENTATION on the line below (and ensure consistent with above fix) ---
         lag_calculation_method_message = "Inter-stage lags not available. " 
 
     if not all_segments_found_and_valid or pd.isna(avg_actual_lag_days_for_display):
@@ -529,12 +565,12 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 overall_lag_calc_val = calculate_avg_lag_generic(processed_df, ts_col_start_overall, ts_col_end_overall)
         if pd.notna(overall_lag_calc_val):
             avg_actual_lag_days_for_display = overall_lag_calc_val
-            lag_calculation_method_message += "Used historical overall lag (first funnel stage to ICF)." # Appends to previous message
+            lag_calculation_method_message += "Used historical overall lag (first funnel stage to ICF)." 
         else: 
-            avg_actual_lag_days_for_display = 30.0 # Default lag if overall also fails
-            lag_calculation_method_message += "Used default lag (30 days)." # Appends to previous message
+            avg_actual_lag_days_for_display = 30.0 
+            lag_calculation_method_message += "Used default lag (30 days)." 
             
-    if pd.isna(avg_actual_lag_days_for_display): # Final safety net
+    if pd.isna(avg_actual_lag_days_for_display): 
         avg_actual_lag_days_for_display = 30.0
         lag_calculation_method_message = "Critical Lag Error: All methods failed. Used default 30 days."
 
@@ -662,17 +698,17 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                     site_level_projections_df = site_level_projections_df_temp.sort_index(axis=1, level=[0,1]) 
                     if not site_level_projections_df.empty:
                         numeric_cols_site_level = []
-                        for col_tuple in site_level_projections_df.columns: # Iterate through MultiIndex tuples
-                            if pd.api.types.is_numeric_dtype(site_level_projections_df[col_tuple]): 
-                                numeric_cols_site_level.append(col_tuple)
-                        if numeric_cols_site_level: # Check if list is not empty
+                        for col_tuple in site_level_projections_df.columns:
+                            if pd.api.types.is_numeric_dtype(site_level_projections_df[col_tuple]): numeric_cols_site_level.append(col_tuple)
+                        if numeric_cols_site_level:
                             total_row_values = site_level_projections_df[numeric_cols_site_level].sum(axis=0)
                             total_row_df = pd.DataFrame([total_row_values], index=["Grand Total"])
                             site_level_projections_df = pd.concat([site_level_projections_df, total_row_df])
         return display_df, avg_actual_lag_days_for_display, lpi_date_str, ads_off_date_str, site_level_projections_df, lag_calculation_method_message
     except Exception as e: 
-        st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e) # Print full traceback for debugging
+        st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e)
         return default_return_tuple[0], default_return_tuple[1], default_return_tuple[2], default_return_tuple[3], default_return_tuple[4], f"Error: {e}"
+
 
 # --- Streamlit UI ---
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
@@ -718,7 +754,7 @@ with st.sidebar:
         weights_input_local["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr') 
         weights_input_local["StS -> Appt %"] = st.slider("StS -> Appt Sched %", 0, 100, 30, key='w_sa') 
         weights_input_local["Appt -> ICF %"] = st.slider("Appt Sched -> ICF %", 0, 100, 15, key='w_ai') 
-        weights_input_local["Lag Qual -> ICF (Days)"] = st.slider("Lag Qual -> ICF (Days)", 0, 100, 0, key='w_lagqicf') # Added for weighting
+        weights_input_local["Lag Qual -> ICF (Days)"] = st.slider("Lag Qual -> ICF (Days)", 0, 100, 0, key='w_lagqicf') 
         total_weight_input_local = sum(abs(w) for w in weights_input_local.values()) 
         if total_weight_input_local > 0: weights_normalized = {k: v / total_weight_input_local for k, v in weights_input_local.items()}
         else: weights_normalized = {k: 0 for k in weights_input_local} 
@@ -773,11 +809,17 @@ with st.sidebar:
             rolling_window_months_sidebar = st.selectbox("Select Rolling Window (Months):", [1, 3, 6], index=1, key='rolling_window') 
             if st.session_state.data_processed_successfully and st.session_state.referral_data_processed is not None and \
                st.session_state.ordered_stages is not None and st.session_state.ts_col_map is not None:
+                # --- MODIFIED: Pass inter_stage_lags to determine_effective_projection_rates ---
                 determine_effective_projection_rates(
-                    st.session_state.referral_data_processed, st.session_state.ordered_stages, 
-                    st.session_state.ts_col_map, rate_assumption_method_sidebar, 
-                    rolling_window_months_sidebar, manual_proj_conv_rates_sidebar,
-                    sidebar_display_area=st.sidebar)
+                    st.session_state.referral_data_processed, 
+                    st.session_state.ordered_stages, 
+                    st.session_state.ts_col_map, 
+                    rate_assumption_method_sidebar, 
+                    rolling_window_months_sidebar, 
+                    manual_proj_conv_rates_sidebar,
+                    st.session_state.get('inter_stage_lags', {}), # Pass the lags
+                    sidebar_display_area=st.sidebar
+                )
             else: st.sidebar.caption("Upload data to view calculated rolling rates.")
         else: rolling_window_months_sidebar = 0; st.caption("Using manually input rates above.")
 
@@ -819,6 +861,7 @@ if st.session_state.data_processed_successfully:
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
     with tab1:
         st.header("Monthly ProForma (Historical Cohorts)")
+        # ... (Tab 1 content remains the same)
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and ad_spend_input_dict is not None:
             proforma_df = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict) 
             if not proforma_df.empty:
@@ -827,7 +870,7 @@ if st.session_state.data_processed_successfully:
                 for idx in proforma_display.index:
                      if 'Cost' in idx or 'Spend' in idx: format_dict[idx] = "${:,.2f}"
                      elif '%' in idx: format_dict[idx] = "{:.1%}"
-                     else: format_dict[idx] = "{:,.0f}" # Default for counts
+                     else: format_dict[idx] = "{:,.0f}" 
                 st.dataframe(proforma_display.style.format(format_dict, na_rep='-'))
                 try:
                      csv = proforma_df.reset_index().to_csv(index=False).encode('utf-8')
@@ -835,8 +878,10 @@ if st.session_state.data_processed_successfully:
                 except Exception as e: st.warning(f"Download button error: {e}")
             else: st.warning("Could not generate ProForma table.")
         else: st.warning("ProForma cannot be calculated until data is loaded and processed.")
+
     with tab2:
         st.header("Site Performance Ranking")
+        # ... (Tab 2 content remains the same)
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized is not None:
             site_metrics_calculated = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map) 
             if not site_metrics_calculated.empty:
@@ -865,44 +910,78 @@ if st.session_state.data_processed_successfully:
                 else: st.warning("Site ranking display table is empty.")
             else: st.warning("Could not calculate site metrics."); st.session_state.site_metrics_calculated = pd.DataFrame() 
         else: st.warning("Site performance cannot be calculated until data is loaded and processed.")
+    
     with tab3:
         st.header("Projections")
+        # --- MODIFIED: Pass inter_stage_lags to determine_effective_projection_rates ---
         _effective_projection_conv_rates_tab3, _method_desc_for_display_tab3 = determine_effective_projection_rates(
-            referral_data_processed, ordered_stages, ts_col_map, 
-            rate_assumption_method_sidebar, rolling_window_months_sidebar, 
-            manual_proj_conv_rates_sidebar, sidebar_display_area=None)
+            referral_data_processed, 
+            ordered_stages, 
+            ts_col_map, 
+            rate_assumption_method_sidebar, 
+            rolling_window_months_sidebar, 
+            manual_proj_conv_rates_sidebar,
+            inter_stage_lags_data, # Pass the calculated lags here
+            sidebar_display_area=None # Not displaying in sidebar here, but in main tab
+        )
+        
         st.caption(f"**Projection Using: {_method_desc_for_display_tab3} Conversion Rates**")
         if "Rolling" in _method_desc_for_display_tab3 and not any(s in _method_desc_for_display_tab3 for s in ["Failed", "No History", "Error"]):
             if isinstance(_effective_projection_conv_rates_tab3, dict) and _effective_projection_conv_rates_tab3:
-                st.markdown("---"); st.write("Effective Rolling Rates Applied for this Projection:")
+                st.markdown("---"); st.write("Effective Rolling Rates Applied for this Projection (Adj. & Matured):")
                 for key, val in _effective_projection_conv_rates_tab3.items():
                      if key in manual_proj_conv_rates_sidebar: st.text(f"- {key}: {val*100:.1f}%")
+        
         st.markdown("---")
-        with st.expander("View Calculated Average Inter-Stage Lags (Historical Data)"):
+        with st.expander("View Calculated Average Inter-Stage Lags & Maturity Periods Used"):
             if inter_stage_lags_data:
-                lag_df_list = [{'Stage Transition': key, 'Avg Lag (Days)': f"{val:.1f}" if pd.notna(val) else "N/A"} for key, val in inter_stage_lags_data.items()]
+                lag_df_list = []
+                # --- Display Maturity Periods used in rate calculation (derived from these lags) ---
+                temp_maturity_periods = {}
+                default_maturity_for_display = 45 # Same as in determine_effective_projection_rates
+                if inter_stage_lags_data:
+                    for r_key in manual_proj_conv_rates_sidebar.keys():
+                        avg_lag = inter_stage_lags_data.get(r_key)
+                        if pd.notna(avg_lag) and avg_lag > 0: temp_maturity_periods[r_key] = round(2 * avg_lag)
+                        else: temp_maturity_periods[r_key] = default_maturity_for_display
+                else:
+                    for r_key in manual_proj_conv_rates_sidebar.keys(): temp_maturity_periods[r_key] = default_maturity_for_display
+                
+                for key, val in inter_stage_lags_data.items():
+                    maturity_p = temp_maturity_periods.get(key, "N/A (Not a projection rate segment)")
+                    lag_df_list.append({
+                        'Stage Transition': key, 
+                        'Avg Lag (Days)': f"{val:.1f}" if pd.notna(val) else "N/A",
+                        'Implied Maturity (2xLag, Days)': f"{maturity_p}" if isinstance(maturity_p, (int, float)) else maturity_p
+                        })
                 if lag_df_list: st.table(pd.DataFrame(lag_df_list))
                 else: st.caption("No inter-stage lags calculated or available.")
             else: st.caption("Inter-stage lags have not been calculated.")
         st.markdown("---")
+
         projection_inputs = {
             'horizon': proj_horizon_sidebar, 'spend_dict': proj_spend_dict_sidebar, 
             'cpqr_dict': proj_cpqr_dict_sidebar, 'final_conv_rates': _effective_projection_conv_rates_tab3, 
             'goal_icf': goal_icf_count_sidebar,
             'site_performance_data': st.session_state.get('site_metrics_calculated', pd.DataFrame()),
             'inter_stage_lags': inter_stage_lags_data}
+        
         projection_results_df, avg_lag_days_used_for_proj, lpi_date_str_proj, ads_off_date_str_proj, site_level_projections_df, lag_calc_msg_from_proj = calculate_projections(
             referral_data_processed, ordered_stages, ts_col_map, projection_inputs)
+        
         st.markdown("---")
         col1_info, col2_info, col3_info = st.columns(3)
         with col1_info: st.metric(label="Goal Total ICFs", value=f"{goal_icf_count_sidebar:,}")
         with col2_info: st.metric(label="Estimated LPI Date", value=lpi_date_str_proj) 
         with col3_info: st.metric(label="Estimated Ads Off Date", value=ads_off_date_str_proj) 
+        
         if pd.notna(avg_lag_days_used_for_proj): st.caption(f"Lag applied in projections: **{avg_lag_days_used_for_proj:.1f} days**. ({lag_calc_msg_from_proj})")
         else: st.caption(f"Lag could not be determined. ({lag_calc_msg_from_proj})")
         st.markdown("---")
+
         if projection_results_df is not None and not projection_results_df.empty and isinstance(projection_results_df, pd.DataFrame): 
             st.subheader("Projected Monthly ICFs & Cohort CPICF")
+            # ... (Rest of Tab 3 display for projection_results_df, chart, download remains the same) ...
             display_cols_proj = ['Forecasted_Ad_Spend', 'Forecasted_Qual_Referrals', 'Projected_ICF_Landed', 'Projected_CPICF_Cohort_Source']
             results_display = projection_results_df[[col for col in display_cols_proj if col in projection_results_df.columns]].copy() 
             if not results_display.empty:
@@ -924,8 +1003,10 @@ if st.session_state.data_processed_successfully:
                 except Exception as e: st.warning(f"Download button error: {e}")
             else: st.warning("Projection results table is empty after selecting columns.")
         else: st.warning("Could not calculate projections.")
+
         st.markdown("---")
         st.subheader("Site-Level Monthly Projections (Editable)")
+        # ... (Rest of Tab 3 display for site_level_projections_df, editor, download remains the same) ...
         if site_level_projections_df is not None and not site_level_projections_df.empty:
             display_site_df_main = site_level_projections_df.copy()
             if display_site_df_main.index.name == 'Site': display_site_df_main.reset_index(inplace=True)
@@ -940,5 +1021,6 @@ if st.session_state.data_processed_successfully:
                 st.download_button(label="Download Edited Site Projections", data=csv_site_proj, file_name='edited_site_level_projections.csv', mime='text/csv', key='dl_edited_site_proj_main')
             except Exception as e: st.warning(f"Download button error for site projections: {e}")
         else: st.info("Site-level projection data is not available or is empty.")
+
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
