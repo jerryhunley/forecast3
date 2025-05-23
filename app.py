@@ -111,6 +111,8 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
          if ts_col in df.columns: df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce') 
     return df
 
+# --- Calculation Functions for App Sections ---
+
 def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
     if _processed_df is None or _processed_df.empty: return pd.DataFrame()
     if not isinstance(monthly_ad_spend_input, dict): return pd.DataFrame()
@@ -341,7 +343,7 @@ def score_sites(_site_metrics_df, weights):
              return _site_metrics_df
         return pd.DataFrame()
 
-# --- REMOVED @st.cache_data decorator from determine_effective_projection_rates ---
+# --- REMOVED @st.cache_data from determine_effective_projection_rates ---
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map, 
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
                                           sidebar_display_area=None): 
@@ -561,23 +563,32 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 if site_counts_hist.sum() > 0:
                     site_proportions = site_counts_hist / site_counts_hist.sum()
             
-            # Overall Qual to ICF rate (fallback)
+            # Calculate overall Qual to ICF rate (as a general fallback if site-specific is not available)
             overall_qual_to_icf_rate_calc = 1.0
             if ordered_stages and icf_stage_name and icf_stage_name in ordered_stages:
                 try:
                     qual_stage_index_for_overall_rate = 0 
                     icf_stage_idx_in_ordered = ordered_stages.index(icf_stage_name)
                     temp_rate_prod = 1.0
-                    for i_rate in range(qual_stage_index_for_overall_rate, icf_stage_idx_in_ordered): 
-                        if i_rate + 1 < len(ordered_stages):
+                    for i_rate in range(qual_stage_index_for_overall_rate, icf_stage_idx_in_ordered +1 ): # Iterate UP TO AND INCLUDING ICF stage for rates
+                        if i_rate + 1 < len(ordered_stages): # Check if there's a "next stage"
                             stage_from_key = ordered_stages[i_rate]
                             stage_to_key = ordered_stages[i_rate + 1]
                             rate_val = final_projection_conv_rates.get(f"{stage_from_key} -> {stage_to_key}", 0)
                             temp_rate_prod *= rate_val
-                        else: break 
-                    overall_qual_to_icf_rate_calc = temp_rate_prod
-                except ValueError: overall_qual_to_icf_rate_calc = 0.0
-            else: overall_qual_to_icf_rate_calc = 0.0
+                            if stage_to_key == icf_stage_name: break # Stop after multiplying the rate that leads to ICF
+                        elif ordered_stages[i_rate] == icf_stage_name : # If current stage is ICF, means it's the last step in a 2-stage funnel to ICF
+                            break 
+                        else: # Should not happen if ICF stage is in ordered_stages and not the very first stage
+                            if i_rate == qual_stage_index_for_overall_rate and ordered_stages[i_rate] == icf_stage_name: # Single step: Qual directly to ICF
+                                temp_rate_prod = final_projection_conv_rates.get(f"{ordered_stages[i_rate]} -> {icf_stage_name}", 0)
+                                break
+                            # Safety if loop structure isn't perfect for all funnel configs
+                            # temp_rate_prod = 0 # Should not happen if icf_idx_in_ordered is correct
+                            # break
+                    qual_to_icf_overall_rate_calc = temp_rate_prod
+                except ValueError: qual_to_icf_overall_rate_calc = 0.0 # icf_stage_name not in ordered_stages
+            else: qual_to_icf_overall_rate_calc = 0.0
 
             all_sites = sorted(_processed_df['Site'].unique())
             site_data_collector = {} 
@@ -597,16 +608,16 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                     site_data_collector[site_name][(month_str_cohort_start, 'Projected Qual. Referrals')] += round(site_proj_qual_referrals_cohort)
                     
                     # --- MODIFIED: Use site-specific rate for ICF generation ---
-                    site_specific_icf_rate = overall_qual_to_icf_rate_calc # Default
+                    site_specific_icf_rate_to_use = overall_qual_to_icf_rate_calc # Default
                     if not site_performance_data.empty and 'Site' in site_performance_data.columns and site_name in site_performance_data['Site'].values:
                         site_perf_row = site_performance_data[site_performance_data['Site'] == site_name]
                         if not site_perf_row.empty and 'Qual -> ICF %' in site_perf_row.columns:
                             rate_from_site_perf = site_perf_row['Qual -> ICF %'].iloc[0]
                             if pd.notna(rate_from_site_perf) and rate_from_site_perf > 0:
-                                site_specific_icf_rate = rate_from_site_perf
+                                site_specific_icf_rate_to_use = rate_from_site_perf
                     # --- END MODIFICATION ---
                     
-                    site_proj_icfs_generated_this_cohort = site_proj_qual_referrals_cohort * site_specific_icf_rate
+                    site_proj_icfs_generated_this_cohort = site_proj_qual_referrals_cohort * site_specific_icf_rate_to_use
                     
                     if site_proj_icfs_generated_this_cohort > 0:
                         full_lag_m_site = int(np.floor(current_lag_days_to_use / days_in_avg_month))
@@ -656,6 +667,7 @@ if 'funnel_definition' not in st.session_state: st.session_state.funnel_definiti
 if 'ordered_stages' not in st.session_state: st.session_state.ordered_stages = None
 if 'ts_col_map' not in st.session_state: st.session_state.ts_col_map = None
 if 'site_metrics_calculated' not in st.session_state: st.session_state.site_metrics_calculated = pd.DataFrame()
+
 
 ad_spend_input_dict = {}; weights_normalized = {}
 proj_horizon_sidebar = 12; proj_spend_dict_sidebar = {}; proj_cpqr_dict_sidebar = {}
@@ -925,55 +937,55 @@ if st.session_state.data_processed_successfully:
 
         # --- Display Site Level Projections ---
         st.markdown("---")
-        st.subheader("Site-Level Monthly Projections (Editable)")
+        st.subheader("Site-Level Monthly Projections (Editable Qual. Referrals)") # Updated subheader
         if site_level_projections_df is not None and not site_level_projections_df.empty:
             display_site_df_main = site_level_projections_df.copy()
             if display_site_df_main.index.name == 'Site':
                 display_site_df_main.reset_index(inplace=True)
             
-            # For st.data_editor, we want to make specific columns non-editable.
-            # Create a list of column names that should NOT be editable (i.e., 'Projected ICFs Landed')
-            # The columns in site_level_projections_df are MultiIndex: (Month, Metric)
-            
-            disabled_cols_site_editor = []
+            # Prepare list of columns to disable (Projected ICFs Landed)
+            disabled_cols_for_editor_actual = []
             if isinstance(display_site_df_main.columns, pd.MultiIndex):
                 for col_month, col_metric in display_site_df_main.columns:
                     if col_metric == 'Projected ICFs Landed':
-                        disabled_cols_site_editor.append((col_month, col_metric))
+                        disabled_cols_for_editor_actual.append((col_month, col_metric))
+            elif 'Site' in display_site_df_main.columns: # Handle if it became single index after reset
+                 for col_name_single in display_site_df_main.columns:
+                     if isinstance(col_name_single, tuple) and col_name_single[1] == 'Projected ICFs Landed':
+                         disabled_cols_for_editor_actual.append(col_name_single)
             
-            # Also, the 'Site' column (if it became a regular column) should not be editable
-            # And 'Grand Total' row should not be part of the editor if possible, or made non-editable.
-            # For simplicity, let's first try disabling the ICF columns.
-            # Separating Grand Total from editable part.
+            if 'Site' in display_site_df_main.columns and 'Site' not in disabled_cols_for_editor_actual:
+                disabled_cols_for_editor_actual.append('Site')
+
+
+            # Separate editable part (sites) from Grand Total for data_editor
+            if 'Site' in display_site_df_main.columns and 'Grand Total' in display_site_df_main['Site'].values:
+                editable_sites_df = display_site_df_main[display_site_df_main['Site'] != 'Grand Total'].copy()
+                total_row_df_display = display_site_df_main[display_site_df_main['Site'] == 'Grand Total'].copy()
+            else: # If Grand Total is index or not present as a distinct row in this manner
+                editable_sites_df = display_site_df_main.copy()
+                total_row_df_display = pd.DataFrame() # Empty dataframe for no total row initially
+
             
-            editable_sites_df = display_site_df_main[display_site_df_main['Site'] != 'Grand Total'].copy() if 'Site' in display_site_df_main.columns and 'Grand Total' in display_site_df_main['Site'].values else display_site_df_main.copy()
-            total_row_df_display = display_site_df_main[display_site_df_main['Site'] == 'Grand Total'].copy() if 'Site' in display_site_df_main.columns and 'Grand Total' in display_site_df_main['Site'].values else pd.DataFrame()
-
-            # Further refine disabled_cols for the editable_sites_df structure if 'Site' was moved from index
-            if 'Site' in editable_sites_df.columns:
-                 disabled_cols_for_editor_actual = [col for col in editable_sites_df.columns if isinstance(col, tuple) and col[1] == 'Projected ICFs Landed']
-                 disabled_cols_for_editor_actual.append('Site') # Disable editing of Site name itself
-            else: # If Site is still index
-                 disabled_cols_for_editor_actual = [col for col in editable_sites_df.columns if col[1] == 'Projected ICFs Landed']
-
-
             edited_site_level_df = st.data_editor(
                 editable_sites_df, 
                 use_container_width=True,
-                key="site_level_editor_editable_qual",
-                disabled=disabled_cols_for_editor_actual, # Disable ICF columns and Site column
-                num_rows="fixed" # Sites are fixed based on data
+                key="site_level_editor_qual_only",
+                disabled=disabled_cols_for_editor_actual,
+                num_rows = "fixed" # Keep rows fixed, only values are edited
             )
             
             if not total_row_df_display.empty:
-                st.caption("Totals (based on initial calculation, not live edits from above table):")
-                st.dataframe(total_row_df_display.style.format("{:,.0f}", na_rep='0'), use_container_width=True)
+                st.caption("Totals (based on initial calculation, will update on next full projection run if edits impact overall):")
+                # Formatting for total row
+                format_dict_total = {col: "{:,.0f}" for col in total_row_df_display.columns if col != 'Site'}
+                st.dataframe(total_row_df_display.style.format(format_dict_total, na_rep='0'), use_container_width=True)
 
-            # Next step will be to use 'edited_site_level_df' to update ICFs and then main projections
-            # For now, we just display it.
-            
+            # Store edited_site_level_df in session state if you want to use it for recalculations
+            # st.session_state.edited_site_projections = edited_site_level_df 
+            # This part (recalculating based on edits) is for step 4, 5, 6
+
             try:
-                # Download the potentially edited data
                 csv_site_proj = edited_site_level_df.to_csv(index=False).encode('utf-8') 
                 st.download_button(label="Download Edited Site Projections", data=csv_site_proj, file_name='edited_site_level_projections.csv', mime='text/csv', key='dl_edited_site_proj_main')
             except Exception as e:
@@ -981,6 +993,7 @@ if st.session_state.data_processed_successfully:
         else:
             st.info("Site-level projection data is not available or is empty.")
         # --- END Site Level Projections Display ---
+
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
