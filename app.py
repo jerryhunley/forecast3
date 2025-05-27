@@ -21,7 +21,6 @@ STAGE_SIGNED_ICF = "Signed ICF"
 STAGE_SCREEN_FAILED = "Screen Failed" # Example, if used in metrics
 
 # --- Helper Functions ---
-# ... (parse_funnel_definition, parse_datetime_with_timezone, parse_history_string, get_stage_timestamps - UNCHANGED from previous version) ...
 @st.cache_data
 def parse_funnel_definition(uploaded_file):
     if uploaded_file is None: return None, None, None
@@ -39,8 +38,6 @@ def parse_funnel_definition(uploaded_file):
             parsed_funnel_definition[stage_name] = statuses
             clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"; ts_col_map[stage_name] = clean_ts_name
         if not parsed_ordered_stages: st.error("Could not parse stages from Funnel Definition."); return None, None, None
-        # Ensure global stage constants are in parsed_ordered_stages if they are expected to be part of the funnel
-        # This might need adjustment based on how flexible funnel def is.
         return parsed_funnel_definition, parsed_ordered_stages, ts_col_map
     except Exception as e:
         st.error(f"Error parsing Funnel Definition file: {e}"); st.exception(e)
@@ -132,7 +129,6 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
         cohort_summary = cohort_summary.set_index("Submission_Month")
         cohort_summary["Ad Spend"] = cohort_summary.index.map(monthly_ad_spend_input).fillna(0)
         reached_stage_cols_map = {}
-        # POF is our base for "Pre-Screener Qualified"
         ts_pof_col_name = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
 
         for stage_name in ordered_stages:
@@ -143,18 +139,17 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
                 if pd.api.types.is_datetime64_any_dtype(processed_df[ts_col]):
                      reached_stage_count = processed_df.dropna(subset=[ts_col]).groupby("Submission_Month").size()
                      cohort_summary[reached_col_cleaned] = reached_stage_count
-                else: cohort_summary[reached_col_cleaned] = 0 # Should be datetime if preproc worked
+                else: cohort_summary[reached_col_cleaned] = 0
         cohort_summary = cohort_summary.fillna(0)
-        for col in cohort_summary.columns: # Ensure counts are int
+        for col in cohort_summary.columns:
             if col != "Ad Spend": cohort_summary[col] = cohort_summary[col].astype(int)
         cohort_summary["Ad Spend"] = cohort_summary["Ad Spend"].astype(float)
         
-        # Determine the base count for "Pre-Screener Qualified"
         base_count_col_name_in_summary = None
         if ts_pof_col_name and reached_stage_cols_map.get(STAGE_PASSED_ONLINE_FORM) in cohort_summary.columns:
             cohort_summary.rename(columns={reached_stage_cols_map[STAGE_PASSED_ONLINE_FORM]: "Pre-Screener Qualified"}, inplace=True, errors='ignore')
             base_count_col_name_in_summary = "Pre-Screener Qualified"
-        elif "Total Qualified Referrals_Calc" in cohort_summary.columns: # Fallback to total if POF not distinct
+        elif "Total Qualified Referrals_Calc" in cohort_summary.columns:
             cohort_summary.rename(columns={"Total Qualified Referrals_Calc": "Pre-Screener Qualified"}, inplace=True, errors='ignore')
             base_count_col_name_in_summary = "Pre-Screener Qualified"
         else:
@@ -167,14 +162,12 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
             proforma_metrics["Pre-Screener Qualified"] = cohort_summary[base_count_col_name_in_summary]
             proforma_metrics["Cost per Qualified Pre-screen"] = (cohort_summary["Ad Spend"] / cohort_summary[base_count_col_name_in_summary].replace(0, np.nan)).round(2)
             
-            # Add counts for all stages
             for stage_orig, reached_col_mapped in reached_stage_cols_map.items():
                  metric_name = f"Total {stage_orig}"
-                 if stage_orig == STAGE_PASSED_ONLINE_FORM : metric_name = "Pre-Screener Qualified" # Already handled
+                 if stage_orig == STAGE_PASSED_ONLINE_FORM : metric_name = "Pre-Screener Qualified"
                  if reached_col_mapped in cohort_summary.columns and metric_name not in proforma_metrics.columns:
                      proforma_metrics[metric_name] = cohort_summary[reached_col_mapped]
 
-            # Specific conversion rates
             sts_col_actual = reached_stage_cols_map.get(STAGE_SENT_TO_SITE)
             appt_col_actual = reached_stage_cols_map.get(STAGE_APPOINTMENT_SCHEDULED)
             icf_col_actual = reached_stage_cols_map.get(STAGE_SIGNED_ICF)
@@ -191,7 +184,6 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
         st.error(f"ProForma Calc Error: {e}"); st.exception(e)
         return pd.DataFrame()
 
-# ... (calculate_avg_lag_generic, calculate_overall_inter_stage_lags - UNCHANGED) ...
 def calculate_avg_lag_generic(df, col_from, col_to):
     if not col_from or not col_to or col_from not in df or col_to not in df or \
        not pd.api.types.is_datetime64_any_dtype(df[col_from]) or \
@@ -199,60 +191,54 @@ def calculate_avg_lag_generic(df, col_from, col_to):
         return np.nan
     valid_df = df.dropna(subset=[col_from, col_to])
     if valid_df.empty: return np.nan
-    try: # Ensure they are actual datetime objects before subtraction
+    try: 
         col_from_dt = pd.to_datetime(valid_df[col_from], errors='coerce')
         col_to_dt = pd.to_datetime(valid_df[col_to], errors='coerce')
-    except Exception: return np.nan # Should not happen if already datetime
+    except Exception: return np.nan
     
-    # Filter out rows where conversion failed (became NaT)
     valid_comparison_df = valid_df.loc[col_from_dt.notna() & col_to_dt.notna()].copy()
     if valid_comparison_df.empty: return np.nan
 
-    # Use .loc to access series data correctly for subtraction
     diff = col_to_dt.loc[valid_comparison_df.index] - col_from_dt.loc[valid_comparison_df.index]
-    diff_positive = diff[diff >= pd.Timedelta(days=0)] # Consider only positive or zero lags
+    diff_positive = diff[diff >= pd.Timedelta(days=0)] 
     if diff_positive.empty: return np.nan
-    return diff_positive.mean().total_seconds() / (60*60*24) # Convert to days
+    return diff_positive.mean().total_seconds() / (60*60*24)
 
 @st.cache_data
 def calculate_overall_inter_stage_lags(_processed_df, ordered_stages, ts_col_map):
     if _processed_df is None or _processed_df.empty or not ordered_stages or not ts_col_map:
-        return {} # Return empty dict if inputs are invalid
+        return {} 
     inter_stage_lags = {}
     for i in range(len(ordered_stages) - 1):
         stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]
         ts_col_from = ts_col_map.get(stage_from); ts_col_to = ts_col_map.get(stage_to)
-        # Ensure TS columns exist in the DataFrame before calculating lag
         if ts_col_from and ts_col_to and ts_col_from in _processed_df.columns and ts_col_to in _processed_df.columns:
             avg_lag = calculate_avg_lag_generic(_processed_df, ts_col_from, ts_col_to)
             inter_stage_lags[f"{stage_from} -> {stage_to}"] = avg_lag
-        else: # One or both TS columns not found for this stage transition
+        else: 
             inter_stage_lags[f"{stage_from} -> {stage_to}"] = np.nan
     return inter_stage_lags
 
-# ... (calculate_site_metrics, score_sites, determine_effective_projection_rates, calculate_projections - UNCHANGED from previous version) ...
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns:
         return pd.DataFrame()
 
     processed_df = _processed_df.copy(); site_metrics_list = []
-    # Using global stage constants
     ts_pof_col = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
     ts_psa_col = ts_col_map.get(STAGE_PRE_SCREENING_ACTIVITIES)
     ts_sts_col = ts_col_map.get(STAGE_SENT_TO_SITE)
     ts_appt_col = ts_col_map.get(STAGE_APPOINTMENT_SCHEDULED)
     ts_icf_col = ts_col_map.get(STAGE_SIGNED_ICF)
-    ts_sf_col = ts_col_map.get(STAGE_SCREEN_FAILED) # Assuming STAGE_SCREEN_FAILED is defined
+    ts_sf_col = ts_col_map.get(STAGE_SCREEN_FAILED)
 
-    # Ensure all potential TS columns exist, fill with NaT if not
     potential_ts_cols = [ts_pof_col, ts_psa_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col]
     for col_name in potential_ts_cols:
-        if col_name and col_name not in processed_df.columns: # Check if name is not None and not in df
+        if col_name and col_name not in processed_df.columns: 
             processed_df[col_name] = pd.NaT
             processed_df[col_name] = pd.to_datetime(processed_df[col_name], errors='coerce')
     
-    site_contact_attempt_statuses = ["Site Contact Attempt 1"] # Consider making this configurable or broader
-    post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED] # "Enrolled" might be another stage
+    site_contact_attempt_statuses = ["Site Contact Attempt 1"] 
+    post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED]
 
     projection_segments_for_site_lag = [
         (STAGE_PASSED_ONLINE_FORM, STAGE_PRE_SCREENING_ACTIVITIES),
@@ -264,7 +250,6 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
         site_groups = processed_df.groupby('Site')
         for site_name, group in site_groups:
             metrics = {'Site': site_name}
-            # Safely count not-NaT occurrences for each timestamp column
             count_pof = group[ts_pof_col].notna().sum() if ts_pof_col and ts_pof_col in group else 0
             count_psa = group[ts_psa_col].notna().sum() if ts_psa_col and ts_psa_col in group else 0
             count_sts = group[ts_sts_col].notna().sum() if ts_sts_col and ts_sts_col in group else 0
@@ -272,7 +257,7 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
             count_icf = group[ts_icf_col].notna().sum() if ts_icf_col and ts_icf_col in group else 0
             count_sf = group[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group else 0
 
-            metrics['Total Qualified'] = count_pof # POF is "Total Qualified" for site metrics
+            metrics['Total Qualified'] = count_pof
             metrics['PSA Count'] = count_psa
             metrics['StS Count'] = count_sts
             metrics['Appt Count'] = count_appt
@@ -282,7 +267,7 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
             metrics['PSA -> StS %'] = (count_sts / count_psa) if count_psa > 0 else 0.0
             metrics['StS -> Appt %'] = (count_appt / count_sts) if count_sts > 0 else 0.0
             metrics['Appt -> ICF %'] = (count_icf / count_appt) if count_appt > 0 else 0.0
-            metrics['Qual -> ICF %'] = (count_icf / count_pof) if count_pof > 0 else 0.0 # POF to ICF
+            metrics['Qual -> ICF %'] = (count_icf / count_pof) if count_pof > 0 else 0.0
             
             site_total_projection_lag = 0.0
             valid_lag_segments = 0
@@ -294,44 +279,41 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
                     if pd.notna(segment_lag):
                         site_total_projection_lag += segment_lag
                         valid_lag_segments +=1
-                    else: site_total_projection_lag = np.nan; break # If any segment is NaN, total is NaN
-                else: site_total_projection_lag = np.nan; break # TS columns for segment not available
+                    else: site_total_projection_lag = np.nan; break 
+                else: site_total_projection_lag = np.nan; break 
             
-            if valid_lag_segments < len(projection_segments_for_site_lag): # Ensure all segments contributed if not already NaN
+            if valid_lag_segments < len(projection_segments_for_site_lag):
                  site_total_projection_lag = np.nan
             metrics['Site Projection Lag (Days)'] = site_total_projection_lag
             metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag_generic(group, ts_pof_col, ts_icf_col) if ts_pof_col and ts_icf_col else np.nan
             
             ttc_times = []; funnel_movement_steps = []
-            # Ensure history columns are present before trying to access them
             parsed_status_col_name = f"Parsed_Lead_Status_History"
             parsed_stage_col_name = f"Parsed_Lead_Stage_History"
-            
             sent_to_site_group = group.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group else pd.DataFrame()
             
             if not sent_to_site_group.empty and parsed_status_col_name in sent_to_site_group.columns and parsed_stage_col_name in sent_to_site_group.columns:
                 for idx, row in sent_to_site_group.iterrows():
                     ts_sent = row[ts_sts_col]; first_contact_ts = pd.NaT
-                    history_list_status = row.get(parsed_status_col_name, []) # Use .get for safety
-                    if history_list_status: # Check if list is not empty
+                    history_list_status = row.get(parsed_status_col_name, []) 
+                    if history_list_status: 
                         for status_name, event_dt in history_list_status:
                             if status_name in site_contact_attempt_statuses and pd.notna(event_dt) and pd.notna(ts_sent) and event_dt >= ts_sent:
                                 first_contact_ts = event_dt; break
-                    if pd.notna(first_contact_ts) and pd.notna(ts_sent): # Both must be valid dates
+                    if pd.notna(first_contact_ts) and pd.notna(ts_sent): 
                         time_diff = first_contact_ts - ts_sent
                         if time_diff >= pd.Timedelta(0): ttc_times.append(time_diff.total_seconds() / (60*60*24))
                                     
                     stages_reached_post_sts = set()
                     history_list_stage = row.get(parsed_stage_col_name, [])
-                    if history_list_stage and pd.notna(ts_sent): # Check if list is not empty and ts_sent is valid
+                    if history_list_stage and pd.notna(ts_sent): 
                          for stage_name_hist, event_dt_hist in history_list_stage:
                              if stage_name_hist in post_sts_progress_stages and pd.notna(event_dt_hist) and event_dt_hist > ts_sent:
                                  stages_reached_post_sts.add(stage_name_hist)
                     funnel_movement_steps.append(len(stages_reached_post_sts))
             metrics['Avg TTC (Days)'] = np.mean(ttc_times) if ttc_times else np.nan
-            metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps) if funnel_movement_steps else 0.0 # Default to 0 if no data
-            
-            metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0 # Assuming Screen Fail is relative to ICF
+            metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps) if funnel_movement_steps else 0.0
+            metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0
             site_metrics_list.append(metrics)
         
         site_metrics_df_final = pd.DataFrame(site_metrics_list)
@@ -350,71 +332,61 @@ def score_sites(_site_metrics_df, weights):
         site_metrics_df_indexed = site_metrics_df.set_index('Site')
         metrics_to_scale = list(weights.keys())
         lower_is_better = ["Avg TTC (Days)", "Site Screen Fail %", "Lag Qual -> ICF (Days)", "Site Projection Lag (Days)"]
-        scaled_metrics_data = site_metrics_df_indexed.reindex(columns=metrics_to_scale).copy() # Ensure only weighted columns are scaled
-        for col in metrics_to_scale: # Iterate only over columns that have weights
-            if col not in scaled_metrics_data.columns: # Should not happen if reindex worked
-                scaled_metrics_data[col] = 0 if col not in lower_is_better else np.nan # Default fill, though reindex should handle this
-            
-            # Fill NaNs before scaling
+        scaled_metrics_data = site_metrics_df_indexed.reindex(columns=metrics_to_scale).copy()
+        for col in metrics_to_scale: 
+            if col not in scaled_metrics_data.columns: 
+                scaled_metrics_data[col] = 0 if col not in lower_is_better else np.nan
             if col in lower_is_better:
-                # For 'lower is better', fill NaNs with a value worse than max (e.g., max + std, or just a large number if max is 0 or NaN)
                 max_val = scaled_metrics_data[col].max(skipna=True);
-                # A large constant or max + significant value
                 fill_val = (max_val + scaled_metrics_data[col].std(skipna=True)) if pd.notna(max_val) and max_val > 0 and pd.notna(scaled_metrics_data[col].std(skipna=True)) else 999
                 scaled_metrics_data[col] = scaled_metrics_data[col].fillna(fill_val)
-            else: # For 'higher is better', fill NaNs with 0 or a value worse than min
+            else: 
                 scaled_metrics_data[col] = scaled_metrics_data[col].fillna(0)
 
-        scaled_metrics_display = pd.DataFrame(index=scaled_metrics_data.index) # Will hold 0-1 scaled values
-        
+        scaled_metrics_display = pd.DataFrame(index=scaled_metrics_data.index)
         if not scaled_metrics_data.empty:
-            for col in metrics_to_scale: # Iterate only over columns that have weights
+            for col in metrics_to_scale: 
                  if col in scaled_metrics_data.columns:
                      min_val = scaled_metrics_data[col].min(); max_val = scaled_metrics_data[col].max()
-                     if min_val == max_val: # All values are the same (or only one site)
-                         scaled_metrics_display[col] = 0.5 # Assign a neutral score
+                     if min_val == max_val: 
+                         scaled_metrics_display[col] = 0.5 
                      elif pd.notna(min_val) and pd.notna(max_val) and (max_val - min_val) != 0 :
-                         scaler = MinMaxScaler(); # Scales to 0-1 range
+                         scaler = MinMaxScaler(); 
                          scaled_values = scaler.fit_transform(scaled_metrics_data[[col]]);
                          scaled_metrics_display[col] = scaled_values.flatten()
-                     else: # Should not happen if NaNs were filled and min_val != max_val
-                         scaled_metrics_display[col] = 0.5 # Fallback neutral score
-                 else: # Should not happen if 'col' from weights.keys()
+                     else: 
+                         scaled_metrics_display[col] = 0.5 
+                 else: 
                      scaled_metrics_display[col] = 0.5
-            
-            # Invert scores for 'lower_is_better' metrics
             for col in lower_is_better:
                 if col in scaled_metrics_display.columns:
                     scaled_metrics_display[col] = 1 - scaled_metrics_display[col]
 
         site_metrics_df_indexed['Score_Raw'] = 0.0; total_weight_applied = 0.0
-        for metric, weight_value in weights.items(): # Use weight_value not weight_pct for clarity
+        for metric, weight_value in weights.items(): 
              if metric in scaled_metrics_display.columns:
-                 current_scaled_metric_series = scaled_metrics_display.get(metric) # Get the 0-1 scaled series
+                 current_scaled_metric_series = scaled_metrics_display.get(metric) 
                  if current_scaled_metric_series is not None:
-                     # Fill NaNs in scaled series with 0.5 (neutral) before applying weight, though ideally NaNs are handled before scaling
                      site_metrics_df_indexed['Score_Raw'] += current_scaled_metric_series.fillna(0.5) * weight_value
-                 else: # Fallback if metric somehow not in scaled_metrics_display
-                     site_metrics_df_indexed['Score_Raw'] += 0.5 * weight_value # Neutral contribution
-                 total_weight_applied += abs(weight_value) # Sum of absolute weights
+                 else: 
+                     site_metrics_df_indexed['Score_Raw'] += 0.5 * weight_value 
+                 total_weight_applied += abs(weight_value) 
         
         if total_weight_applied > 0:
             site_metrics_df_indexed['Score'] = (site_metrics_df_indexed['Score_Raw'] / total_weight_applied) * 100
-        else: # No weights applied or all weights are zero
+        else: 
             site_metrics_df_indexed['Score'] = 0.0
-        
-        site_metrics_df_indexed['Score'] = site_metrics_df_indexed['Score'].fillna(0.0) # Final NaN check for score
+        site_metrics_df_indexed['Score'] = site_metrics_df_indexed['Score'].fillna(0.0)
 
-        # Grading logic (unchanged)
         if len(site_metrics_df_indexed) > 1:
             site_metrics_df_indexed['Score_Rank_Percentile'] = site_metrics_df_indexed['Score'].rank(pct=True)
             bins = [0, 0.10, 0.25, 0.60, 0.85, 1.0]; labels = ['F', 'D', 'C', 'B', 'A']
             try: site_metrics_df_indexed['Grade'] = pd.qcut(site_metrics_df_indexed['Score_Rank_Percentile'], q=bins, labels=labels, duplicates='drop')
-            except ValueError: # Fallback if qcut fails (e.g., not enough distinct percentiles)
+            except ValueError: 
                  st.warning("Using fixed score ranges for grading (percentile method failed).")
                  def assign_grade_fallback(score_value):
                      if pd.isna(score_value): return 'N/A'
-                     score_value = round(score_value) # Round to nearest int for grading bands
+                     score_value = round(score_value) 
                      if score_value >= 90: return 'A'
                      elif score_value >= 80: return 'B'
                      elif score_value >= 70: return 'C'
@@ -422,15 +394,17 @@ def score_sites(_site_metrics_df, weights):
                      else: return 'F'
                  site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_grade_fallback)
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A')
-        elif len(site_metrics_df_indexed) == 1: # Single site grading
-            def assign_single_site_grade(score_value):
+        elif len(site_metrics_df_indexed) == 1: 
+            def assign_single_site_grade(score_value): # CORRECTED THIS FUNCTION
                 if pd.isna(score_value): return 'N/A'
                 score_value = round(score_value)
-                if score_value >= 90: return 'A' ; elif score_value >= 80: return 'B'
-                elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'
+                if score_value >= 90: return 'A'
+                elif score_value >= 80: return 'B'
+                elif score_value >= 70: return 'C'
+                elif score_value >= 60: return 'D'
                 else: return 'F'
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_single_site_grade)
-        else: # No sites
+        else: 
             site_metrics_df_indexed['Grade'] = None
         
         final_df_output = site_metrics_df_indexed.reset_index()
@@ -438,10 +412,10 @@ def score_sites(_site_metrics_df, weights):
         return final_df_output
     except Exception as e:
         st.error(f"Error during Site Scoring: {e}"); st.exception(e)
-        if _site_metrics_df is not None and not _site_metrics_df.empty: # Attempt to return original if error
+        if _site_metrics_df is not None and not _site_metrics_df.empty: 
              if _site_metrics_df.index.name == 'Site' and 'Site' not in _site_metrics_df.columns: return _site_metrics_df.reset_index()
              return _site_metrics_df
-        return pd.DataFrame() # Empty if all else fails
+        return pd.DataFrame()
 
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map,
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
@@ -450,7 +424,6 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     MIN_DENOMINATOR_FOR_RATE_CALC = 5; DEFAULT_MATURITY_DAYS = 45; MATURITY_LAG_MULTIPLIER = 1.5
     MIN_EFFECTIVE_MATURITY_DAYS = 20; MIN_TOTAL_DENOMINATOR_FOR_OVERALL_RATE = 20
     
-    # Ensure ts_col_map is not None before proceeding (critical for mapping stage names)
     if ts_col_map is None:
         if sidebar_display_area: sidebar_display_area.error("TS Column Map not available for rate calculation.")
         return manual_rates_sidebar, "Manual (TS Col Map Missing)"
@@ -465,13 +438,13 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     calculated_rolling_rates = {}; method_description = "Manual (Error or No History for Rolling)"; substitutions_made_log = []
     MATURITY_PERIODS_DAYS = {}
     if inter_stage_lags_for_maturity:
-        for rate_key_for_lag in manual_rates_sidebar.keys(): # Iterate over defined projection segments
+        for rate_key_for_lag in manual_rates_sidebar.keys(): 
             avg_lag_for_key = inter_stage_lags_for_maturity.get(rate_key_for_lag)
             if pd.notna(avg_lag_for_key) and avg_lag_for_key > 0:
                 calculated_maturity = round(MATURITY_LAG_MULTIPLIER * avg_lag_for_key)
                 MATURITY_PERIODS_DAYS[rate_key_for_lag] = max(calculated_maturity, MIN_EFFECTIVE_MATURITY_DAYS)
             else: MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
-    else: # Fallback if inter_stage_lags not available
+    else: 
         for rate_key_for_lag in manual_rates_sidebar.keys(): MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
         substitutions_made_log.append(f"Maturity: Inter-stage lags N/A or empty, used default {DEFAULT_MATURITY_DAYS}d for all.")
 
@@ -480,47 +453,40 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
             if sidebar_display_area: sidebar_display_area.warning("Not enough historical submission month data. Using manual rates.")
             return manual_rates_sidebar, "Manual (No Submission Month History)"
         
-        # Aggregate counts by Submission_Month
         hist_counts = _processed_df.groupby("Submission_Month").size().to_frame(name="Total_Submissions_Calc")
-        
-        # Map stage names to their count columns in hist_counts
         reached_stage_cols_map_hist = {}
-        for stage_name_iter in ordered_stages: # Iterate through all defined funnel stages
+        for stage_name_iter in ordered_stages: 
             ts_col_iter = ts_col_map.get(stage_name_iter)
             if ts_col_iter and ts_col_iter in _processed_df.columns and pd.api.types.is_datetime64_any_dtype(_processed_df[ts_col_iter]):
                 cleaned_stage_name_for_col = f"Reached_{stage_name_iter.replace(' ', '_').replace('(', '').replace(')', '')}"
                 reached_stage_cols_map_hist[stage_name_iter] = cleaned_stage_name_for_col
                 stage_monthly_counts = _processed_df.dropna(subset=[ts_col_iter]).groupby(_processed_df['Submission_Month']).size()
                 hist_counts = hist_counts.join(stage_monthly_counts.rename(cleaned_stage_name_for_col), how='left')
-        hist_counts = hist_counts.fillna(0) # Fill NaNs from join with 0
+        hist_counts = hist_counts.fillna(0)
 
-        # Base for QL (POF)
         pof_hist_col_mapped_name = reached_stage_cols_map_hist.get(STAGE_PASSED_ONLINE_FORM)
         valid_historical_rates_found = False
 
-        for rate_key in manual_rates_sidebar.keys(): # rate_key is "StageFrom -> StageTo"
+        for rate_key in manual_rates_sidebar.keys(): 
             try: stage_from_name, stage_to_name = rate_key.split(" -> ")
-            except ValueError: # Malformed rate_key
+            except ValueError: 
                 calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
                 substitutions_made_log.append(f"{rate_key}: Error parsing stage names, used manual rate."); continue
 
-            # Get the actual column name for stage_from_name in hist_counts
-            if stage_from_name == STAGE_PASSED_ONLINE_FORM: # Special handling for POF as the base
-                actual_col_from = pof_hist_col_mapped_name if pof_hist_col_mapped_name else "Total_Submissions_Calc" # Fallback
+            if stage_from_name == STAGE_PASSED_ONLINE_FORM: 
+                actual_col_from = pof_hist_col_mapped_name if pof_hist_col_mapped_name else "Total_Submissions_Calc"
             else:
                 actual_col_from = reached_stage_cols_map_hist.get(stage_from_name)
-            
             col_to_cleaned_name = reached_stage_cols_map_hist.get(stage_to_name)
 
             if actual_col_from and col_to_cleaned_name and actual_col_from in hist_counts.columns and col_to_cleaned_name in hist_counts.columns:
                 total_numerator = hist_counts[col_to_cleaned_name].sum(); total_denominator = hist_counts[actual_col_from].sum()
                 overall_hist_rate_for_key = (total_numerator / total_denominator) if total_denominator > 0 else np.nan
-                manual_rate_for_key = manual_rates_sidebar.get(rate_key, 0.0) # Default from UI
+                manual_rate_for_key = manual_rates_sidebar.get(rate_key, 0.0) 
                 maturity_days_for_this_rate = MATURITY_PERIODS_DAYS.get(rate_key, DEFAULT_MATURITY_DAYS)
                 
                 adjusted_monthly_rates_list = []; months_used_for_rate = []
-                for month_period_loop in hist_counts.index: # Iterate over months with data
-                    # Check maturity: month_period_loop.end_time is the last day of that month
+                for month_period_loop in hist_counts.index: 
                     if month_period_loop.end_time + pd.Timedelta(days=maturity_days_for_this_rate) < pd.Timestamp(datetime.now()):
                         months_used_for_rate.append(month_period_loop)
                         numerator_val = hist_counts.loc[month_period_loop, col_to_cleaned_name]
@@ -528,55 +494,49 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                         rate_for_this_month_calc = 0.0
                         
                         if denominator_val < MIN_DENOMINATOR_FOR_RATE_CALC:
-                            # Denominator too small, consider manual or overall historical
                             rate_for_this_month_calc = manual_rate_for_key
                             log_reason_detail = f"used manual rate ({manual_rate_for_key*100:.1f}%)"
-                            # Check if manual rate is a placeholder (e.g., 0% or 100%)
-                            is_manual_rate_placeholder = (manual_rate_for_key >= 0.99 or manual_rate_for_key <= 0.01) # Heuristic for placeholder
+                            is_manual_rate_placeholder = (manual_rate_for_key >= 0.99 or manual_rate_for_key <= 0.01) 
                             if is_manual_rate_placeholder:
                                 if pd.notna(overall_hist_rate_for_key) and total_denominator >= MIN_TOTAL_DENOMINATOR_FOR_OVERALL_RATE:
                                     rate_for_this_month_calc = overall_hist_rate_for_key
                                     log_reason_detail = f"manual placeholder, used overall hist. ({overall_hist_rate_for_key*100:.1f}%, total N={total_denominator})"
-                                # else, stick with the placeholder if overall historical is also bad
                             substitutions_made_log.append(f"Mth {month_period_loop.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, {log_reason_detail}. Maturity: {maturity_days_for_this_rate}d.")
-                        elif denominator_val > 0: # Denominator is sufficient
+                        elif denominator_val > 0: 
                             rate_for_this_month_calc = numerator_val / denominator_val
-                        # else denominator is 0, rate_for_this_month_calc remains 0.0
-                        
                         adjusted_monthly_rates_list.append(rate_for_this_month_calc)
-                    else: # Month excluded due to recency (not mature)
+                    else: 
                         substitutions_made_log.append(f"Mth {month_period_loop.strftime('%Y-%m')} for '{rate_key}': Excluded (too recent, maturity: {maturity_days_for_this_rate}d).")
                 
-                if not adjusted_monthly_rates_list: # No mature historical months found
-                    calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) # Fallback to manual
+                if not adjusted_monthly_rates_list: 
+                    calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0) 
                     substitutions_made_log.append(f"{rate_key}: No mature hist. mths (mat: {maturity_days_for_this_rate}d), used manual rate."); continue
 
                 adjusted_monthly_rates_series = pd.Series(adjusted_monthly_rates_list, index=pd.PeriodIndex(months_used_for_rate, freq='M'))
-                actual_window_to_calc = min(rolling_window_sidebar, len(adjusted_monthly_rates_series)) # Window cannot be larger than data
+                actual_window_to_calc = min(rolling_window_sidebar, len(adjusted_monthly_rates_series)) 
 
                 if actual_window_to_calc > 0 and not adjusted_monthly_rates_series.empty:
                     rolling_avg_rate_series = adjusted_monthly_rates_series.rolling(window=actual_window_to_calc, min_periods=1).mean()
                     if not rolling_avg_rate_series.empty:
                         latest_rolling_rate = rolling_avg_rate_series.iloc[-1]
                         calculated_rolling_rates[rate_key] = latest_rolling_rate if pd.notna(latest_rolling_rate) else 0.0
-                        valid_historical_rates_found = True # At least one rate calculated from history
-                    else: # Rolling average series was empty for some reason
+                        valid_historical_rates_found = True 
+                    else: 
                         calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
                         substitutions_made_log.append(f"{rate_key}: Rolling avg empty (mat: {maturity_days_for_this_rate}d), used manual rate.")
-                else: # Window is 0 or no data for rolling
-                    if not adjusted_monthly_rates_series.empty: # If there's some mature data, use its mean
+                else: 
+                    if not adjusted_monthly_rates_series.empty: 
                         mean_mature_rate_val = adjusted_monthly_rates_series.mean()
                         calculated_rolling_rates[rate_key] = mean_mature_rate_val if pd.notna(mean_mature_rate_val) else manual_rates_sidebar.get(rate_key, 0.0)
                         substitutions_made_log.append(f"{rate_key}: Window {actual_window_to_calc} (mat: {maturity_days_for_this_rate}d) too small or no data; used mean of mature or manual. Valid: {pd.notna(mean_mature_rate_val)}")
                         if pd.notna(mean_mature_rate_val): valid_historical_rates_found = True
-                    else: # Absolutely no mature data
+                    else: 
                         calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
                         substitutions_made_log.append(f"{rate_key}: No mature data for rolling (mat: {maturity_days_for_this_rate}d), used manual rate.")
-            else: # Stage columns not found in hist_counts
+            else: 
                 calculated_rolling_rates[rate_key] = manual_rates_sidebar.get(rate_key, 0.0)
                 substitutions_made_log.append(f"{rate_key}: Stage columns N/A in historical summary, used manual rate.")
 
-        # Display logs if a sidebar area is provided
         if sidebar_display_area and substitutions_made_log:
             with sidebar_display_area.expander("Rolling Rate Calculation Log (Adjustments & Maturity)", expanded=False):
                 sidebar_display_area.caption("Maturity Periods Applied (Days):")
@@ -586,14 +546,14 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                 sidebar_display_area.caption("--- Substitution/Exclusion Log ---")
                 for log_entry_disp in substitutions_made_log: sidebar_display_area.caption(log_entry_disp)
         
-        if not valid_historical_rates_found: # If no rates could be derived from history
+        if not valid_historical_rates_found: 
             if sidebar_display_area: sidebar_display_area.warning("No valid historical rolling rates could be calculated, using manual inputs provided.")
             return manual_rates_sidebar, "Manual (All Rolling Calcs Failed or Invalid)"
         else:
             if sidebar_display_area:
                 sidebar_display_area.markdown("---"); sidebar_display_area.subheader(f"Effective {rolling_window_sidebar}-Mo. Rolling Rates (Adj. & Matured):")
                 for key_disp, val_disp in calculated_rolling_rates.items():
-                    if key_disp in manual_rates_sidebar: sidebar_display_area.text(f"- {key_disp}: {val_disp*100:.1f}%") # Show calculated rates
+                    if key_disp in manual_rates_sidebar: sidebar_display_area.text(f"- {key_disp}: {val_disp*100:.1f}%") 
                 sidebar_display_area.markdown("---")
             return calculated_rolling_rates, f"Rolling {rolling_window_sidebar}-Month Avg (Adj. & Matured)"
     except Exception as e:
@@ -617,13 +577,12 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     assumed_cpqr_dict = projection_inputs['cpqr_dict']
     final_projection_conv_rates = projection_inputs['final_conv_rates']
     goal_total_icfs = projection_inputs['goal_icf']
-    site_performance_data = projection_inputs['site_performance_data'] #This is site_metrics_df
+    site_performance_data = projection_inputs['site_performance_data'] 
     inter_stage_lags = projection_inputs.get('inter_stage_lags', {})
     icf_variation_percent = projection_inputs.get('icf_variation_percentage', 0)
     variation_factor = icf_variation_percent / 100.0
 
     avg_actual_lag_days_for_display = np.nan; lag_calculation_method_message = "Lag not calculated."
-    # Define the projection path using global stage constants
     projection_segments_for_lag_path = [
         (STAGE_PASSED_ONLINE_FORM, STAGE_PRE_SCREENING_ACTIVITIES),
         (STAGE_PRE_SCREENING_ACTIVITIES, STAGE_SENT_TO_SITE),
@@ -632,32 +591,29 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     ]
     calculated_sum_of_lags = 0; valid_segments_count = 0; all_segments_found_and_valid = True
 
-    if inter_stage_lags: # Check if inter_stage_lags dict is not empty
+    if inter_stage_lags: 
         for stage_from, stage_to in projection_segments_for_lag_path:
             lag_key = f"{stage_from} -> {stage_to}"; lag_value = inter_stage_lags.get(lag_key)
-            # Ensure stages exist in ts_col_map (i.e., they are part of the defined funnel)
             if ts_col_map.get(stage_from) and ts_col_map.get(stage_to):
                 if pd.notna(lag_value):
                     calculated_sum_of_lags += lag_value; valid_segments_count += 1
-                else: # A specific lag in the path is NaN
+                else: 
                     all_segments_found_and_valid = False; break
-            else: # A stage in the defined path is not in the funnel definition
+            else: 
                 all_segments_found_and_valid = False; break
         if all_segments_found_and_valid and valid_segments_count == len(projection_segments_for_lag_path):
             avg_actual_lag_days_for_display = calculated_sum_of_lags
             lag_calculation_method_message = "Using summed inter-stage lags for POF->ICF projection path."
-        else: # Reset flag if not all segments were found or valid
+        else: 
             all_segments_found_and_valid = False
             lag_calculation_method_message = "Summed inter-stage lag for POF->ICF path failed. "
-    else: # inter_stage_lags is empty
+    else: 
         all_segments_found_and_valid = False
         lag_calculation_method_message = "Inter-stage lags not available. "
 
-    # Fallback for overall lag if summed path failed
     if not all_segments_found_and_valid or pd.isna(avg_actual_lag_days_for_display):
-        # Use overall lag from the first defined stage in 'ordered_stages' to 'Signed ICF'
         start_stage_for_overall_lag = ordered_stages[0] if ordered_stages and len(ordered_stages) > 0 else None
-        end_stage_for_overall_lag = STAGE_SIGNED_ICF # Use constant
+        end_stage_for_overall_lag = STAGE_SIGNED_ICF 
         overall_lag_calc_val = np.nan
         if start_stage_for_overall_lag and ts_col_map.get(start_stage_for_overall_lag) and ts_col_map.get(end_stage_for_overall_lag):
             ts_col_start_overall = ts_col_map[start_stage_for_overall_lag]
@@ -668,11 +624,11 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         if pd.notna(overall_lag_calc_val):
             avg_actual_lag_days_for_display = overall_lag_calc_val
             lag_calculation_method_message += f"Used historical overall lag ({start_stage_for_overall_lag} -> {end_stage_for_overall_lag})."
-        else: # Last resort default
-            avg_actual_lag_days_for_display = 30.0 # Default lag
+        else: 
+            avg_actual_lag_days_for_display = 30.0 
             lag_calculation_method_message += "Used default lag (30 days)."
             
-    if pd.isna(avg_actual_lag_days_for_display): # Should be caught by default above
+    if pd.isna(avg_actual_lag_days_for_display): 
         avg_actual_lag_days_for_display = 30.0
         lag_calculation_method_message = "Critical Lag Error: All methods failed. Used default 30 days."
 
@@ -684,81 +640,67 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         projection_cohorts = pd.DataFrame(index=future_months)
         projection_cohorts['Forecasted_Ad_Spend'] = [future_spend_dict.get(m, 0.0) for m in future_months]
         
-        forecasted_psq_list = [] # PSQ = Pre-Screener Qualified (e.g., Passed Online Form)
+        forecasted_psq_list = [] 
         for month_period in future_months:
             spend = projection_cohorts.loc[month_period, 'Forecasted_Ad_Spend']
-            cpqr_for_month = assumed_cpqr_dict.get(month_period, 120.0) # CPQR = Cost Per Qualified Referral (POF)
-            if cpqr_for_month <= 0: cpqr_for_month = 120.0 # Avoid division by zero / non-positive CPQR
+            cpqr_for_month = assumed_cpqr_dict.get(month_period, 120.0) 
+            if cpqr_for_month <= 0: cpqr_for_month = 120.0 
             forecasted_psq_list.append(np.round(spend / cpqr_for_month).astype(int) if cpqr_for_month > 0 else 0)
         projection_cohorts['Forecasted_PSQ'] = forecasted_psq_list
         projection_cohorts['Forecasted_PSQ'] = projection_cohorts['Forecasted_PSQ'].fillna(0).astype(int)
 
-        # Project through the funnel segments
-        icf_proj_col_name_base = "" # This will be the column name for generated ICFs (base count)
-        current_stage_count_col = 'Forecasted_PSQ' # Start with POF/PSQ counts
+        icf_proj_col_name_base = "" 
+        current_stage_count_col = 'Forecasted_PSQ' 
 
-        for stage_from, stage_to in projection_segments_for_lag_path: # Iterate through defined path
+        for stage_from, stage_to in projection_segments_for_lag_path: 
             conv_rate_key = f"{stage_from} -> {stage_to}"
-            conv_rate = final_projection_conv_rates.get(conv_rate_key, 0.0) # Get rate for this segment
-            
-            # Create column name for the 'to' stage
+            conv_rate = final_projection_conv_rates.get(conv_rate_key, 0.0) 
             proj_col_to_name = f"Projected_{stage_to.replace(' ', '_').replace('(', '').replace(')', '')}"
-            
             if current_stage_count_col in projection_cohorts.columns:
                 proj_counts_for_to_stage = (projection_cohorts[current_stage_count_col] * conv_rate)
                 projection_cohorts[proj_col_to_name] = proj_counts_for_to_stage.round(0).fillna(0).astype(int)
-                current_stage_count_col = proj_col_to_name # Next iteration starts from this new stage's count
-            else: # Should not happen if 'Forecasted_PSQ' is correctly initialized
+                current_stage_count_col = proj_col_to_name 
+            else: 
                 projection_cohorts[proj_col_to_name] = 0
                 current_stage_count_col = proj_col_to_name
-            
-            if stage_to == STAGE_SIGNED_ICF: # If we've reached the ICF stage
-                icf_proj_col_name_base = proj_col_to_name; break # Found ICF column, exit loop
+            if stage_to == STAGE_SIGNED_ICF: 
+                icf_proj_col_name_base = proj_col_to_name; break 
         
         projection_results = pd.DataFrame(index=future_months); projection_results['Projected_ICF_Landed'] = 0.0
         if not icf_proj_col_name_base or icf_proj_col_name_base not in projection_cohorts.columns:
             st.error(f"Critical Error: Projected ICF column ('{icf_proj_col_name_base}') not found after funnel progression.");
             return default_return_tuple[0], avg_actual_lag_days_for_display, "Error", "Error", pd.DataFrame(), "ICF Proj Col Missing after funnel calc"
 
-        # ICF variation for CI
         icf_proj_col_low = f"{icf_proj_col_name_base}_low"
         icf_proj_col_high = f"{icf_proj_col_name_base}_high"
         projection_cohorts[icf_proj_col_low] = (projection_cohorts[icf_proj_col_name_base] * (1 - variation_factor)).round(0).astype(int).clip(lower=0)
         projection_cohorts[icf_proj_col_high] = (projection_cohorts[icf_proj_col_name_base] * (1 + variation_factor)).round(0).astype(int).clip(lower=0)
 
-        # CPICF calculation (Mean, Low, High for the cohort)
         projection_cohorts['Projected_CPICF_Cohort_Mean'] = (projection_cohorts['Forecasted_Ad_Spend'] / projection_cohorts[icf_proj_col_name_base].replace(0, np.nan)).round(2)
         projection_cohorts['Projected_CPICF_Cohort_Low'] = (projection_cohorts['Forecasted_Ad_Spend'] / projection_cohorts[icf_proj_col_high].replace(0, np.nan)).round(2)
         projection_cohorts['Projected_CPICF_Cohort_High'] = (projection_cohorts['Forecasted_Ad_Spend'] / projection_cohorts[icf_proj_col_low].replace(0, np.nan)).round(2)
 
-        # ICF Landing Logic (using overall_current_lag_days_to_use = avg_actual_lag_days_for_display)
         overall_current_lag_days_to_use = avg_actual_lag_days_for_display
-        days_in_avg_month = 30.4375 # Average days in a month
+        days_in_avg_month = 30.4375 
 
         for cohort_start_month_iter, row_data in projection_cohorts.iterrows():
-            icfs_from_this_cohort_val = row_data[icf_proj_col_name_base] # Use base ICF count for landing distribution
+            icfs_from_this_cohort_val = row_data[icf_proj_col_name_base] 
             if icfs_from_this_cohort_val == 0: continue
-
             full_lag_months_val = int(np.floor(overall_current_lag_days_to_use / days_in_avg_month))
             remaining_lag_days_comp_val = overall_current_lag_days_to_use - (full_lag_months_val * days_in_avg_month)
             fraction_for_next_month_val = remaining_lag_days_comp_val / days_in_avg_month
             fraction_for_current_offset_month_val = 1.0 - fraction_for_next_month_val
-
             icfs_month_1_val = icfs_from_this_cohort_val * fraction_for_current_offset_month_val
             icfs_month_2_val = icfs_from_this_cohort_val * fraction_for_next_month_val
-            
             landing_month_1_period_val = cohort_start_month_iter + full_lag_months_val
             landing_month_2_period_val = cohort_start_month_iter + full_lag_months_val + 1
-
             if landing_month_1_period_val in projection_results.index:
                 projection_results.loc[landing_month_1_period_val, 'Projected_ICF_Landed'] += icfs_month_1_val
-            if landing_month_2_period_val in projection_results.index: # Check if second landing month is within horizon
+            if landing_month_2_period_val in projection_results.index: 
                 projection_results.loc[landing_month_2_period_val, 'Projected_ICF_Landed'] += icfs_month_2_val
-        
         projection_results['Projected_ICF_Landed'] = projection_results['Projected_ICF_Landed'].round(0).fillna(0).astype(int)
         projection_results['Cumulative_ICF_Landed'] = projection_results['Projected_ICF_Landed'].cumsum()
 
-        # LPI Date calculation
         lpi_month_series_val = projection_results[projection_results['Cumulative_ICF_Landed'] >= goal_total_icfs]
         if not lpi_month_series_val.empty:
             lpi_month_period_val = lpi_month_series_val.index[0]
@@ -770,25 +712,22 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 lpi_day_offset_val = int(np.ceil(fraction_of_lpi_month_val * days_in_avg_month)); lpi_day_offset_val = max(1, lpi_day_offset_val)
                 lpi_date_val_calc = lpi_month_period_val.start_time + pd.Timedelta(days=lpi_day_offset_val -1)
                 lpi_date_str = lpi_date_val_calc.strftime('%Y-%m-%d')
-            elif icfs_needed_in_lpi_month_val <= 0: # Goal met before this month started
-                lpi_date_str = (lpi_month_period_val.start_time - pd.Timedelta(days=1)).strftime('%Y-%m-%d') # End of previous month
-            else: # Goal met exactly at start of this month (e.g. from previous month's full contribution)
+            elif icfs_needed_in_lpi_month_val <= 0: 
+                lpi_date_str = (lpi_month_period_val.start_time - pd.Timedelta(days=1)).strftime('%Y-%m-%d') 
+            else: 
                 lpi_date_str = lpi_month_period_val.start_time.strftime('%Y-%m-%d')
         
-        # Ads Off Date
         projection_cohorts['Cumulative_Projected_ICF_Generated'] = projection_cohorts[icf_proj_col_name_base].cumsum()
         ads_off_month_series_val = projection_cohorts[projection_cohorts['Cumulative_Projected_ICF_Generated'] >= goal_total_icfs]
         if not ads_off_month_series_val.empty:
             ads_off_month_period_val = ads_off_month_series_val.index[0]
-            ads_off_date_str = ads_off_month_period_val.end_time.strftime('%Y-%m-%d') # End of month when enough generated
+            ads_off_date_str = ads_off_month_period_val.end_time.strftime('%Y-%m-%d') 
 
-        # Prepare display_df for output
         display_df_out = pd.DataFrame(index=future_months)
         display_df_out['Forecasted_Ad_Spend'] = projection_cohorts['Forecasted_Ad_Spend']
-        display_df_out['Forecasted_Qual_Referrals'] = projection_cohorts['Forecasted_PSQ'] # POF equivalent
+        display_df_out['Forecasted_Qual_Referrals'] = projection_cohorts['Forecasted_PSQ'] 
         display_df_out['Projected_ICF_Landed'] = projection_results['Projected_ICF_Landed']
 
-        # Shift CPICF values to align with when the cohort's ICFs predominantly land
         cpicf_display_mean_val = pd.Series(index=future_months, dtype=float)
         cpicf_display_low_val = pd.Series(index=future_months, dtype=float)
         cpicf_display_high_val = pd.Series(index=future_months, dtype=float)
@@ -797,7 +736,6 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         for i_cohort_idx, cohort_start_month_cpicf in enumerate(projection_cohorts.index):
             primary_land_m_cpicf = cohort_start_month_cpicf + lag_for_cpicf_display_val
             if primary_land_m_cpicf in cpicf_display_mean_val.index:
-                 # Only fill if the target landing month for this cohort's CPICF is currently NaN
                 if pd.isna(cpicf_display_mean_val.loc[primary_land_m_cpicf]):
                     cpicf_display_mean_val.loc[primary_land_m_cpicf] = projection_cohorts.iloc[i_cohort_idx]['Projected_CPICF_Cohort_Mean']
                     cpicf_display_low_val.loc[primary_land_m_cpicf] = projection_cohorts.iloc[i_cohort_idx]['Projected_CPICF_Cohort_Low']
@@ -807,21 +745,18 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         display_df_out['Projected_CPICF_Cohort_Source_Low'] = cpicf_display_low_val
         display_df_out['Projected_CPICF_Cohort_Source_High'] = cpicf_display_high_val
         
-        # Site-Level Projections
         if 'Site' in _processed_df.columns and not _processed_df['Site'].empty and ordered_stages:
-            # Use site_performance_data (which is site_metrics_df)
-            # Ensure site_metrics_df is not empty and 'Site' column exists
             if site_performance_data.empty or 'Site' not in site_performance_data.columns:
                  st.warning("Site performance data is empty or missing 'Site' column for site-level projections.")
-                 site_level_projections_df_final = pd.DataFrame() # Ensure it's an empty DF
+                 site_level_projections_df_final = pd.DataFrame() 
             else:
                 historical_site_pof_proportions = _processed_df[_processed_df[ts_col_map.get(STAGE_PASSED_ONLINE_FORM)].notna()]['Site'].value_counts(normalize=True) if ts_col_map.get(STAGE_PASSED_ONLINE_FORM) in _processed_df else pd.Series(dtype=float)
-                all_sites_proj = site_performance_data['Site'].unique() # Sites from site_metrics_df
+                all_sites_proj = site_performance_data['Site'].unique() 
                 site_data_collector_proj = {}
 
                 for site_name_s_proj in all_sites_proj:
                     site_data_collector_proj[site_name_s_proj] = {}
-                    for month_period_s_proj in future_months: # Use future_months (projection horizon)
+                    for month_period_s_proj in future_months: 
                         month_str_s_proj = month_period_s_proj.strftime('%Y-%m')
                         site_data_collector_proj[site_name_s_proj][(month_str_s_proj, 'Projected Qual. Referrals (POF)')] = 0
                         site_data_collector_proj[site_name_s_proj][(month_str_s_proj, 'Projected ICFs Landed')] = 0.0
@@ -838,36 +773,28 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                         site_data_collector_proj[site_name_iter_s_proj][(month_str_cohort_start_s_proj, 'Projected Qual. Referrals (POF)')] += round(site_proj_pof_cohort_s_proj)
                         
                         site_perf_row_s_proj = site_performance_data[site_performance_data['Site'] == site_name_iter_s_proj]
-                        current_site_proj_count_s_proj = site_proj_pof_cohort_s_proj # Start with POFs for this site's cohort
+                        current_site_proj_count_s_proj = site_proj_pof_cohort_s_proj 
 
-                        # Progress this site's cohort through the funnel segments
                         for i_seg_s, (stage_from_seg_s, stage_to_seg_s) in enumerate(projection_segments_for_lag_path):
-                            # Determine conversion rate: site-specific or overall
-                            site_rate_key_s = "" # To store the specific column name from site_metrics_df
+                            site_rate_key_s = "" 
                             if stage_from_seg_s == STAGE_PASSED_ONLINE_FORM and stage_to_seg_s == STAGE_PRE_SCREENING_ACTIVITIES: site_rate_key_s = 'POF -> PSA %'
                             elif stage_from_seg_s == STAGE_PRE_SCREENING_ACTIVITIES and stage_to_seg_s == STAGE_SENT_TO_SITE: site_rate_key_s = 'PSA -> StS %'
                             elif stage_from_seg_s == STAGE_SENT_TO_SITE and stage_to_seg_s == STAGE_APPOINTMENT_SCHEDULED: site_rate_key_s = 'StS -> Appt %'
                             elif stage_from_seg_s == STAGE_APPOINTMENT_SCHEDULED and stage_to_seg_s == STAGE_SIGNED_ICF: site_rate_key_s = 'Appt -> ICF %'
-                            
                             overall_rate_key_s = f"{stage_from_seg_s} -> {stage_to_seg_s}"
-                            rate_to_use_s = final_projection_conv_rates.get(overall_rate_key_s, 0.0) # Default to overall projection rate
-
+                            rate_to_use_s = final_projection_conv_rates.get(overall_rate_key_s, 0.0) 
                             if not site_perf_row_s_proj.empty and site_rate_key_s and site_rate_key_s in site_perf_row_s_proj.columns:
                                 site_specific_rate_val_s = site_perf_row_s_proj[site_rate_key_s].iloc[0]
                                 if pd.notna(site_specific_rate_val_s): rate_to_use_s = site_specific_rate_val_s
-                            
                             current_site_proj_count_s_proj *= rate_to_use_s
-                            if stage_to_seg_s == STAGE_SIGNED_ICF: break # Reached ICFs for this site's cohort portion
-                        
+                            if stage_to_seg_s == STAGE_SIGNED_ICF: break 
                         site_proj_icfs_generated_this_cohort_s = current_site_proj_count_s_proj
                         
-                        # Determine lag for this site (site-specific or overall)
-                        lag_to_use_for_site_s = overall_current_lag_days_to_use # Default to overall POF->ICF lag
+                        lag_to_use_for_site_s = overall_current_lag_days_to_use 
                         if not site_perf_row_s_proj.empty and 'Site Projection Lag (Days)' in site_perf_row_s_proj.columns:
                             site_specific_lag_val_s = site_perf_row_s_proj['Site Projection Lag (Days)'].iloc[0]
                             if pd.notna(site_specific_lag_val_s): lag_to_use_for_site_s = site_specific_lag_val_s
                         
-                        # Land these generated ICFs for the site
                         if site_proj_icfs_generated_this_cohort_s > 0:
                             full_lag_m_site_s = int(np.floor(lag_to_use_for_site_s / days_in_avg_month))
                             remain_lag_days_comp_site_s = lag_to_use_for_site_s - (full_lag_m_site_s * days_in_avg_month)
@@ -877,7 +804,6 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                             icfs_m2_site_s = site_proj_icfs_generated_this_cohort_s * frac_next_m_site_s
                             land_m1_p_site_s = cohort_start_month_s_proj + full_lag_m_site_s
                             land_m2_p_site_s = land_m1_p_site_s + 1
-
                             if land_m1_p_site_s in future_months:
                                 site_data_collector_proj[site_name_iter_s_proj][(land_m1_p_site_s.strftime('%Y-%m'), 'Projected ICFs Landed')] += icfs_m1_site_s
                             if land_m2_p_site_s in future_months:
@@ -892,46 +818,39 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                         if (m_period_fmt_s_proj, 'Projected Qual. Referrals (POF)') in site_level_projections_df_final.columns:
                             site_level_projections_df_final[(m_period_fmt_s_proj, 'Projected Qual. Referrals (POF)')] = site_level_projections_df_final[(m_period_fmt_s_proj, 'Projected Qual. Referrals (POF)')].astype(int)
                     site_level_projections_df_final = site_level_projections_df_final.sort_index(axis=1, level=[0,1])
-                    if not site_level_projections_df_final.empty: # Add Grand Total row
+                    if not site_level_projections_df_final.empty: 
                         numeric_cols_slp = [col for col in site_level_projections_df_final.columns if pd.api.types.is_numeric_dtype(site_level_projections_df_final[col])]
                         if numeric_cols_slp:
                             total_row_vals_slp = site_level_projections_df_final[numeric_cols_slp].sum(axis=0)
                             total_row_df_slp = pd.DataFrame([total_row_vals_slp], index=["Grand Total"])
                             site_level_projections_df_final = pd.concat([site_level_projections_df_final, total_row_df_slp])
-        
         return display_df_out, avg_actual_lag_days_for_display, lpi_date_str, ads_off_date_str, site_level_projections_df_final, lag_calculation_method_message
     except Exception as e:
         st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e)
         return default_return_tuple[0], avg_actual_lag_days_for_display if pd.notna(avg_actual_lag_days_for_display) else 30.0, "Error", "Error", pd.DataFrame(), f"Error: {e}"
 
-
 # --- NEW: AI Forecast Core Function ---
-# @st.cache_data # Consider caching after development stabilizes
 def calculate_ai_forecast_core(
     goal_lpi_date_dt: datetime,
     goal_icf_number: int,
-    estimated_cpql: float, # Cost Per Qualified Lead (e.g., POF)
+    estimated_cpql: float, 
     icf_variation_percent: float,
-    # Data from existing app state/calculations:
     processed_df: pd.DataFrame,
     ordered_stages: list,
     ts_col_map: dict,
-    effective_projection_conv_rates: dict, # Overall/Rolling rates from determine_effective_projection_rates
-    avg_overall_lag_days: float, # Lag from QL (POF) to ICF
+    effective_projection_conv_rates: dict, 
+    avg_overall_lag_days: float, 
     site_metrics_df: pd.DataFrame,
-    projection_horizon_months: int # Max months to project forward for AI
+    projection_horizon_months: int 
 ):
-    # --- 1. Initial Setup & Parameter Validation ---
-    default_return_ai = pd.DataFrame(), pd.DataFrame(), "N/A", "Not Calculated", True # df, site_df, ads_off, msg, is_unfeasible
-    if not all([processed_df is not None, not processed_df.empty, ordered_stages, ts_col_map, effective_projection_conv_rates, site_metrics_df is not None]): # site_metrics_df can be empty if no sites
+    default_return_ai = pd.DataFrame(), pd.DataFrame(), "N/A", "Not Calculated", True 
+    if not all([processed_df is not None, not processed_df.empty, ordered_stages, ts_col_map, effective_projection_conv_rates, site_metrics_df is not None]):
         return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Missing critical base data for AI Forecast.", True
     if goal_icf_number <= 0: return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Goal ICF number must be positive.", True
     if estimated_cpql <= 0: return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Estimated CPQL must be positive.", True
     if pd.isna(avg_overall_lag_days) or avg_overall_lag_days < 0:
         return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Average POF to ICF lag is invalid or not calculated.", True
 
-    # Define the main funnel path for POF to ICF conversion
-    # These stage names must match those in `effective_projection_conv_rates` keys
     main_funnel_path_segments = [
         f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}",
         f"{STAGE_PRE_SCREENING_ACTIVITIES} -> {STAGE_SENT_TO_SITE}",
@@ -941,29 +860,20 @@ def calculate_ai_forecast_core(
     overall_pof_to_icf_rate = 1.0
     for segment in main_funnel_path_segments:
         rate = effective_projection_conv_rates.get(segment)
-        if rate is None: # or rate < 0 if negative rates are possible
-            return default_return_ai[0], default_return_ai[1], default_return_ai[2], f"Conversion rate for segment '{segment}' not found. Cannot calculate overall POF to ICF rate.", True
+        if rate is None or rate < 0: # Added check for negative rate
+            return default_return_ai[0], default_return_ai[1], default_return_ai[2], f"Conversion rate for segment '{segment}' invalid or not found. Cannot calculate overall POF to ICF rate.", True
         overall_pof_to_icf_rate *= rate
     
-    if overall_pof_to_icf_rate <= 0:
-        return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Overall POF to ICF conversion rate is zero or negative. Cannot project ICFs.", True
+    if overall_pof_to_icf_rate <= 1e-9: # Check for effectively zero rate
+        return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Overall POF to ICF conversion rate is zero or negligible. Cannot project ICFs.", True
 
-    # Determine projection start month
     last_hist_month = processed_df["Submission_Month"].max() if "Submission_Month" in processed_df and not processed_df["Submission_Month"].empty else pd.Period(datetime.now(), freq='M') - 1
     proj_start_month_period = last_hist_month + 1
     goal_lpi_month_period = pd.Period(goal_lpi_date_dt, freq='M')
     
-    # --- 2. Determine Generation Schedule ---
     avg_lag_months_approx = int(round(avg_overall_lag_days / 30.4375))
-    
-    # ICFs must land by goal_lpi_month_period.
-    # The generation period for these ICFs will be shifted earlier by avg_lag_months_approx.
-    # Effective start for landing: Can't be before proj_start_month + lag (if generating from proj_start_month)
-    # Let's assume generation starts at proj_start_month_period
     first_possible_landing_month = proj_start_month_period + avg_lag_months_approx
-    
-    # The window over which ICFs will be *landed* to meet the goal
-    actual_landing_start_month = max(proj_start_month_period, first_possible_landing_month) # Cannot land before proj starts or before first cohort lands
+    actual_landing_start_month = max(proj_start_month_period, first_possible_landing_month) 
     
     landing_window_months = pd.period_range(start=actual_landing_start_month, end=goal_lpi_month_period, freq='M')
 
@@ -973,43 +883,35 @@ def calculate_ai_forecast_core(
     num_months_for_landing = len(landing_window_months)
     target_icfs_to_land_per_month = goal_icf_number / num_months_for_landing
 
-    # Define the overall projection timeframe for calculations
-    # Extends a bit beyond LPI to catch all landing ICFs from generated cohorts
-    max_projection_end_month = goal_lpi_month_period + avg_lag_months_approx + 3 # 3 months buffer
-    # Ensure projection horizon is not excessively long if LPI is far out
+    max_projection_end_month = goal_lpi_month_period + avg_lag_months_approx + 3 
     limited_proj_end_month = proj_start_month_period + projection_horizon_months -1 
     final_proj_end_month = min(max_projection_end_month, limited_proj_end_month)
-
     projection_calc_months = pd.period_range(start=proj_start_month_period, end=final_proj_end_month, freq='M')
-    if projection_calc_months.empty : # Should be caught by LPI check
+    if projection_calc_months.empty : 
         return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Projection calculation window is invalid.", True
-
 
     ai_gen_df = pd.DataFrame(index=projection_calc_months)
     ai_gen_df['Generated_ICF_Mean'] = 0.0
 
-    # For each month in the landing window, determine which generation month it corresponds to.
     for l_month in landing_window_months:
-        g_month = l_month - avg_lag_months_approx # Simplified: ICFs generated in g_month land in l_month
+        g_month = l_month - avg_lag_months_approx 
         if g_month in ai_gen_df.index:
             ai_gen_df.loc[g_month, 'Generated_ICF_Mean'] += target_icfs_to_land_per_month
-        else:
-            # This implies generation needed before proj_start_month_period
-            return default_return_ai[0], default_return_ai[1], default_return_ai[2], f"To meet LPI, ICF generation required before {proj_start_month_period.strftime('%Y-%m')}. Review LPI date or goals.", True
-            
-    # --- 3. Calculate QLs, Spend, CPICF from Generated ICFs ---
+        elif g_month < proj_start_month_period : # Check if generation is needed before proj_start_month
+             return default_return_ai[0], default_return_ai[1], default_return_ai[2], f"To meet LPI, ICF generation required in {g_month.strftime('%Y-%m')}, which is before projection start {proj_start_month_period.strftime('%Y-%m')}. Review LPI or goals.", True
+        # If g_month is outside ai_gen_df.index but not before proj_start_month_period, it means LPI is too far for current horizon (handled later by feasibility)
+
+
     variation_f = icf_variation_percent / 100.0
     ai_gen_df['Generated_ICF_Low'] = (ai_gen_df['Generated_ICF_Mean'] * (1 - variation_f)).round(0).clip(lower=0)
     ai_gen_df['Generated_ICF_High'] = (ai_gen_df['Generated_ICF_Mean'] * (1 + variation_f)).round(0).clip(lower=0)
-    
-    ai_gen_df['Required_QLs_POF'] = ai_gen_df['Generated_ICF_Mean'] / overall_pof_to_icf_rate
+    ai_gen_df['Required_QLs_POF'] = (ai_gen_df['Generated_ICF_Mean'] / overall_pof_to_icf_rate).round(0).astype(int) # Round QLs
     ai_gen_df['Implied_Ad_Spend'] = ai_gen_df['Required_QLs_POF'] * estimated_cpql
     
     ai_gen_df['Projected_CPICF_Mean'] = (ai_gen_df['Implied_Ad_Spend'] / ai_gen_df['Generated_ICF_Mean'].replace(0, np.nan)).round(2)
     ai_gen_df['Projected_CPICF_Low'] = (ai_gen_df['Implied_Ad_Spend'] / ai_gen_df['Generated_ICF_High'].replace(0, np.nan)).round(2)
     ai_gen_df['Projected_CPICF_High'] = (ai_gen_df['Implied_Ad_Spend'] / ai_gen_df['Generated_ICF_Low'].replace(0, np.nan)).round(2)
 
-    # --- 4. Calculate Landed ICFs (using the actual lag distribution) ---
     ai_results_df = pd.DataFrame(index=projection_calc_months)
     ai_results_df['Projected_ICF_Landed'] = 0.0
     days_in_avg_m = 30.4375
@@ -1017,54 +919,39 @@ def calculate_ai_forecast_core(
     for cohort_g_month, cohort_row in ai_gen_df.iterrows():
         icfs_gen_this_cohort = cohort_row['Generated_ICF_Mean']
         if icfs_gen_this_cohort <= 0: continue
-
         full_lag_mths = int(np.floor(avg_overall_lag_days / days_in_avg_m))
         rem_lag_days = avg_overall_lag_days - (full_lag_mths * days_in_avg_m)
-        frac_next = rem_lag_days / days_in_avg_m
-        frac_curr = 1.0 - frac_next
-
-        land_m1 = cohort_g_month + full_lag_mths
-        land_m2 = land_m1 + 1
-        
+        frac_next = rem_lag_days / days_in_avg_m; frac_curr = 1.0 - frac_next
+        land_m1 = cohort_g_month + full_lag_mths; land_m2 = land_m1 + 1
         if land_m1 in ai_results_df.index: ai_results_df.loc[land_m1, 'Projected_ICF_Landed'] += icfs_gen_this_cohort * frac_curr
         if land_m2 in ai_results_df.index: ai_results_df.loc[land_m2, 'Projected_ICF_Landed'] += icfs_gen_this_cohort * frac_next
-            
     ai_results_df['Projected_ICF_Landed'] = ai_results_df['Projected_ICF_Landed'].round(0).astype(int)
     ai_results_df['Cumulative_ICF_Landed'] = ai_results_df['Projected_ICF_Landed'].cumsum()
 
-    # --- 5. Populate ai_results_df with other metrics ---
     ai_results_df['Target_QLs_POF'] = ai_gen_df['Required_QLs_POF'].reindex(ai_results_df.index).fillna(0).round(0).astype(int)
     ai_results_df['Implied_Ad_Spend'] = ai_gen_df['Implied_Ad_Spend'].reindex(ai_results_df.index).fillna(0)
     
-    # Shift CPICF values to align with predominant landing month of the cohort
-    cpicf_m = pd.Series(index=projection_calc_months, dtype=float)
-    cpicf_l = pd.Series(index=projection_calc_months, dtype=float)
-    cpicf_h = pd.Series(index=projection_calc_months, dtype=float)
+    cpicf_m = pd.Series(index=projection_calc_months, dtype=float); cpicf_l = pd.Series(index=projection_calc_months, dtype=float); cpicf_h = pd.Series(index=projection_calc_months, dtype=float)
     for g_m, g_data in ai_gen_df.iterrows():
         if g_data['Generated_ICF_Mean'] > 0:
-            # Predominant landing month for this cohort's CPICF display
-            # (Could be g_m + avg_lag_months_approx, or more nuanced if needed)
             display_land_m = g_m + avg_lag_months_approx 
             if display_land_m in cpicf_m.index and pd.isna(cpicf_m.loc[display_land_m]):
                 cpicf_m.loc[display_land_m] = g_data['Projected_CPICF_Mean']
                 cpicf_l.loc[display_land_m] = g_data['Projected_CPICF_Low']
                 cpicf_h.loc[display_land_m] = g_data['Projected_CPICF_High']
-    
     ai_results_df['Projected_CPICF_Cohort_Source_Mean'] = cpicf_m
     ai_results_df['Projected_CPICF_Cohort_Source_Low'] = cpicf_l
     ai_results_df['Projected_CPICF_Cohort_Source_High'] = cpicf_h
 
-    # --- 6. Ads Off Date ---
     ai_gen_df['Cumulative_Generated_ICF'] = ai_gen_df['Generated_ICF_Mean'].cumsum()
     ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF'] >= goal_icf_number]
     ads_off_date_str_calc = "Goal Not Met by End of Projection"
     if not ads_off_s.empty: ads_off_date_str_calc = ads_off_s.index[0].end_time.strftime('%Y-%m-%d')
 
-    # --- 7. Site Breakdown ---
-    ai_site_proj_df = pd.DataFrame() # Initialize
+    ai_site_proj_df = pd.DataFrame() 
     if 'Site' in processed_df.columns and not site_metrics_df.empty and STAGE_PASSED_ONLINE_FORM in ts_col_map:
         ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
-        hist_site_pof_prop = processed_df[processed_df[ts_pof_col_for_prop].notna()]['Site'].value_counts(normalize=True) if ts_pof_col_for_prop else pd.Series(dtype=float)
+        hist_site_pof_prop = processed_df[processed_df[ts_pof_col_for_prop].notna()]['Site'].value_counts(normalize=True) if ts_pof_col_for_prop and ts_pof_col_for_prop in processed_df else pd.Series(dtype=float)
         
         all_sites_for_ai_tab = site_metrics_df['Site'].unique()
         site_data_coll_ai = {site: { (m.strftime('%Y-%m'), 'Projected QLs (POF)'): 0,
@@ -1074,48 +961,44 @@ def calculate_ai_forecast_core(
         for g_m_site, cohort_r_site in ai_gen_df.iterrows():
             total_qls_cohort = cohort_r_site['Required_QLs_POF']
             if total_qls_cohort <= 0: continue
-
             for site_n in all_sites_for_ai_tab:
                 site_p = hist_site_pof_prop.get(site_n, 0)
                 site_qls = total_qls_cohort * site_p
                 site_data_coll_ai[site_n][(g_m_site.strftime('%Y-%m'), 'Projected QLs (POF)')] += round(site_qls)
-
                 site_perf_r = site_metrics_df[site_metrics_df['Site'] == site_n]
-                site_pof_icf_rate = site_perf_r['Qual -> ICF %'].iloc[0] if not site_perf_r.empty and pd.notna(site_perf_r['Qual -> ICF %'].iloc[0]) else overall_pof_to_icf_rate
+                site_pof_icf_rate = site_perf_r['Qual -> ICF %'].iloc[0] if not site_perf_r.empty and 'Qual -> ICF %' in site_perf_r and pd.notna(site_perf_r['Qual -> ICF %'].iloc[0]) else overall_pof_to_icf_rate
                 site_gen_icfs = site_qls * site_pof_icf_rate
                 
-                # Site ICF Landing (using overall lag for Step 1)
-                # ... (similar landing logic as for ai_results_df) ...
-                s_full_lag_m = int(np.floor(avg_overall_lag_days / days_in_avg_m))
+                s_full_lag_m = int(np.floor(avg_overall_lag_days / days_in_avg_m)) # Using overall lag for site landing in step 1
                 s_rem_lag_d = avg_overall_lag_days - (s_full_lag_m * days_in_avg_m)
                 s_frac_next = s_rem_lag_d / days_in_avg_m; s_frac_curr = 1.0 - s_frac_next
                 s_land_m1 = g_m_site + s_full_lag_m; s_land_m2 = s_land_m1 + 1
                 if s_land_m1 in projection_calc_months: site_data_coll_ai[site_n][(s_land_m1.strftime('%Y-%m'), 'Projected ICFs Landed')] += site_gen_icfs * s_frac_curr
                 if s_land_m2 in projection_calc_months: site_data_coll_ai[site_n][(s_land_m2.strftime('%Y-%m'), 'Projected ICFs Landed')] += site_gen_icfs * s_frac_next
-
         if site_data_coll_ai:
             ai_site_proj_df = pd.DataFrame.from_dict(site_data_coll_ai, orient='index')
-            ai_site_proj_df.columns = pd.MultiIndex.from_tuples(ai_site_proj_df.columns)
-            ai_site_proj_df = ai_site_proj_df.sort_index(axis=1, level=[0,1])
-            # Round ICFs landed
-            for m_fmt in projection_calc_months.strftime('%Y-%m'):
-                if (m_fmt, 'Projected ICFs Landed') in ai_site_proj_df.columns:
-                    ai_site_proj_df[(m_fmt, 'Projected ICFs Landed')] = ai_site_proj_df[(m_fmt, 'Projected ICFs Landed')].round(0).astype(int)
-            # Add Total row
-            num_cols_site_ai = [c for c in ai_site_proj_df.columns if pd.api.types.is_numeric_dtype(ai_site_proj_df[c])]
-            if num_cols_site_ai:
-                total_r_ai = ai_site_proj_df[num_cols_site_ai].sum(axis=0)
-                ai_site_proj_df.loc["Grand Total"] = total_r_ai
-    else: # No site data in processed_df or site_metrics_df
+            if not ai_site_proj_df.empty: # Check if DF is not empty before processing columns
+                ai_site_proj_df.columns = pd.MultiIndex.from_tuples(ai_site_proj_df.columns)
+                ai_site_proj_df = ai_site_proj_df.sort_index(axis=1, level=[0,1])
+                for m_fmt in projection_calc_months.strftime('%Y-%m'):
+                    if (m_fmt, 'Projected ICFs Landed') in ai_site_proj_df.columns:
+                        ai_site_proj_df[(m_fmt, 'Projected ICFs Landed')] = ai_site_proj_df[(m_fmt, 'Projected ICFs Landed')].round(0).astype(int)
+                num_cols_site_ai = [c for c in ai_site_proj_df.columns if pd.api.types.is_numeric_dtype(ai_site_proj_df[c])]
+                if num_cols_site_ai:
+                    total_r_ai = ai_site_proj_df[num_cols_site_ai].sum(axis=0)
+                    # ai_site_proj_df.loc["Grand Total"] = total_r_ai # This can cause issues if index is not Site
+                    total_df_ai = pd.DataFrame(total_r_ai).T # Transpose to a row
+                    total_df_ai.index = ["Grand Total"]
+                    ai_site_proj_df = pd.concat([ai_site_proj_df, total_df_ai])
+    else: 
         ai_site_proj_df = pd.DataFrame()
 
-
-    # --- 8. Final Feasibility Check & Message ---
-    final_cum_landed_icfs = ai_results_df['Cumulative_ICF_Landed'].max()
+    final_cum_landed_icfs = ai_results_df['Cumulative_ICF_Landed'].max() if 'Cumulative_ICF_Landed' in ai_results_df else 0
     goal_met_on_time = False
-    if not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty:
-        actual_lpi_month = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min()
-        if actual_lpi_month <= goal_lpi_month_period:
+    actual_lpi_month_for_msg = goal_lpi_month_period # Default to goal LPI for messages
+    if 'Cumulative_ICF_Landed' in ai_results_df and not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty:
+        actual_lpi_month_for_msg = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min()
+        if actual_lpi_month_for_msg <= goal_lpi_month_period:
             goal_met_on_time = True
     
     feasibility_msg_final = "Projection complete."
@@ -1123,25 +1006,21 @@ def calculate_ai_forecast_core(
     if not goal_met_on_time:
         feasibility_msg_final = f"Goal of {goal_icf_number} ICFs by {goal_lpi_month_period.strftime('%Y-%m')} appears unfeasible with current model. "
         if final_cum_landed_icfs < goal_icf_number:
-            feasibility_msg_final += f"Projected to land only {final_cum_landed_icfs:.0f} ICFs within the projection horizon."
-        elif not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty: # Goal met, but late
-             actual_lpi_month_late = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min()
-             feasibility_msg_final += f"ICF goal met, but by {actual_lpi_month_late.strftime('%Y-%m')} (later than target)."
+            feasibility_msg_final += f"Projected to land only {final_cum_landed_icfs:.0f} ICFs. The goal is met by {actual_lpi_month_for_msg.strftime('%Y-%m')} if projection extends."
+        else: # Goal met, but late
+             feasibility_msg_final += f"ICF goal met, but by {actual_lpi_month_for_msg.strftime('%Y-%m')} (later than target)."
         is_unfeasible_final = True
     
-    # Trim results to a displayable range (e.g., up to when goal is met or max horizon)
     display_end_month = final_proj_end_month
-    if goal_met_on_time and not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty:
-        display_end_month = min(final_proj_end_month, ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min() + 3) # Show a bit past LPI
+    if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df and not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty:
+        # Show projection up to a few months after LPI or end of horizon, whichever is earlier
+        lpi_achieved_month_for_trim = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min()
+        display_end_month = min(final_proj_end_month, lpi_achieved_month_for_trim + 3) 
     
-    ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month].copy()
-
-
+    ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month].copy() if not ai_results_df.empty else pd.DataFrame()
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final, is_unfeasible_final
 
-
 # --- Streamlit UI ---
-# ... (Session state initializations - UNCHANGED) ...
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
 if 'referral_data_processed' not in st.session_state: st.session_state.referral_data_processed = None
 if 'funnel_definition' not in st.session_state: st.session_state.funnel_definition = None
@@ -1149,7 +1028,7 @@ if 'ordered_stages' not in st.session_state: st.session_state.ordered_stages = N
 if 'ts_col_map' not in st.session_state: st.session_state.ts_col_map = None
 if 'site_metrics_calculated' not in st.session_state: st.session_state.site_metrics_calculated = pd.DataFrame()
 if 'inter_stage_lags' not in st.session_state: st.session_state.inter_stage_lags = None
-if 'historical_spend_df' not in st.session_state: # For historical ad spend editor
+if 'historical_spend_df' not in st.session_state: 
             st.session_state.historical_spend_df = pd.DataFrame([
                 {'Month (YYYY-MM)': (datetime.now() - pd.DateOffset(months=2)).strftime('%Y-%m'), 'Historical Spend': 45000.0},
                 {'Month (YYYY-MM)': (datetime.now() - pd.DateOffset(months=1)).strftime('%Y-%m'), 'Historical Spend': 60000.0}
@@ -1161,9 +1040,7 @@ proj_spend_dict_sidebar = {}; proj_cpqr_dict_sidebar = {}; manual_proj_conv_rate
 use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3; goal_icf_count_sidebar = 100
 proj_icf_variation_percent_sidebar = 10
 
-# --- Sidebar ---
 with st.sidebar:
-    # ... (File Uploaders, Historical Ad Spend, Site Scoring Weights, Projection Assumptions - UNCHANGED from previous version where historical ad spend was updated) ...
     st.header("⚙️ Setup")
     uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
     uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader_main")
@@ -1183,15 +1060,14 @@ with st.sidebar:
         for index, row in edited_historical_spend_df.iterrows():
             month_str = str(row['Month (YYYY-MM)']).strip()
             spend_val = row['Historical Spend']
-            if month_str and pd.notna(spend_val) and spend_val >=0 : # Basic validation
+            if month_str and pd.notna(spend_val) and spend_val >=0 : 
                 try:
                     month_period = pd.Period(month_str, freq='M')
                     temp_ad_spend_input_dict[month_period] = float(spend_val)
                 except ValueError: st.sidebar.error(f"Invalid month format for hist. spend: '{month_str}'. Use YYYY-MM."); valid_hist_spend_entries = False; break
                 except Exception as e: st.sidebar.error(f"Error processing hist. spend row ({month_str}, {spend_val}): {e}"); valid_hist_spend_entries = False; break
-            elif not month_str and pd.notna(spend_val): # Spend entered but no month
+            elif not month_str and pd.notna(spend_val): 
                  st.sidebar.warning(f"Row {index+1} in historical spend has amount but no month. Ignoring.");
-            # Allow empty rows without error if both are empty/NaN
         if valid_hist_spend_entries: ad_spend_input_dict = temp_ad_spend_input_dict; st.session_state.historical_spend_df = edited_historical_spend_df
     st.divider()
     with st.expander("Site Scoring Weights"):
@@ -1206,31 +1082,25 @@ with st.sidebar:
         weights_input_local["Site Projection Lag (Days)"] = st.slider("Site Projection Lag (Days)", 0, 100, 0, key='w_siteprojlag_v2', help="Sum of average lags for key funnel segments specific to this site; used in site-level ICF landing projections.")
         total_weight_input_local = sum(abs(w) for w in weights_input_local.values())
         if total_weight_input_local > 0: weights_normalized = {k: v / total_weight_input_local for k, v in weights_input_local.items()}
-        else: weights_normalized = {k: 0 for k in weights_input_local} # All weights zero, avoid division by zero
+        else: weights_normalized = {k: 0 for k in weights_input_local} 
         st.caption(f"Weights normalized. Lower is better for TTC, Screen Fail %, Lags.")
     st.divider()
-    with st.expander("Projection Assumptions", expanded=True): # Main Projection Tab Assumptions
+    with st.expander("Projection Assumptions", expanded=True): 
         proj_horizon_sidebar = st.number_input("Projection Horizon (Months)", min_value=1, max_value=48, value=proj_horizon_sidebar, step=1, key='proj_horizon_widget_v2', help="Max months for the 'Projections' tab.")
         goal_icf_count_sidebar = st.number_input("Goal Total ICFs (for Projections Tab)", min_value=1, value=goal_icf_count_sidebar, step=1, key='goal_icf_input_v2', help="Target ICFs for standard projections.")
-        
         _proj_start_month_ui_editor = pd.Period(datetime.now(), freq='M') + 1
         if st.session_state.data_processed_successfully and st.session_state.referral_data_processed is not None and \
            not st.session_state.referral_data_processed.empty and "Submission_Month" in st.session_state.referral_data_processed.columns:
             last_hist_month_for_ui_editor = st.session_state.referral_data_processed["Submission_Month"].max()
             if pd.notna(last_hist_month_for_ui_editor): _proj_start_month_ui_editor = last_hist_month_for_ui_editor + 1
-        
         proj_horizon_editor_val = proj_horizon_sidebar if proj_horizon_sidebar > 0 else 1
         future_months_ui_for_editor = pd.period_range(start=_proj_start_month_ui_editor, periods=proj_horizon_editor_val, freq='M')
-
         st.write("Future Monthly Ad Spend (Projections Tab):")
-        # Ensure spend_df_for_editor has correct length if proj_horizon_sidebar changes
         current_spend_df_rows = len(st.session_state.get('proj_spend_df_cache', []))
         if current_spend_df_rows != proj_horizon_editor_val or 'proj_spend_df_cache' not in st.session_state:
             st.session_state.proj_spend_df_cache = pd.DataFrame({'Month': future_months_ui_for_editor.strftime('%Y-%m'), 'Planned_Spend': [20000.0] * proj_horizon_editor_val})
-        
         edited_spend_df = st.data_editor(st.session_state.proj_spend_df_cache, key='proj_spend_editor_v5', use_container_width=True, num_rows="fixed")
-        if not edited_spend_df.equals(st.session_state.proj_spend_df_cache): st.session_state.proj_spend_df_cache = edited_spend_df # Persist edits
-
+        if not edited_spend_df.equals(st.session_state.proj_spend_df_cache): st.session_state.proj_spend_df_cache = edited_spend_df 
         proj_spend_dict_sidebar = {m_init: 0.0 for m_init in future_months_ui_for_editor}
         if 'Month' in edited_spend_df.columns and 'Planned_Spend' in edited_spend_df.columns:
              for index, row_spend in edited_spend_df.iterrows():
@@ -1238,51 +1108,44 @@ with st.sidebar:
                      month_str_spend = str(row_spend['Month']).strip(); planned_spend_val = float(row_spend['Planned_Spend'])
                      month_period_spend = pd.Period(month_str_spend, freq='M')
                      if month_period_spend in proj_spend_dict_sidebar: proj_spend_dict_sidebar[month_period_spend] = planned_spend_val
-                 except Exception: pass # Ignore parsing errors for robust UI
-
+                 except Exception: pass 
         st.write("Assumed CPQR ($) per Month (Projections Tab):")
         default_cpqr_value = 120.0
-        if current_spend_df_rows != proj_horizon_editor_val or 'proj_cpqr_df_cache' not in st.session_state: # Rebuild if horizon changed
+        if current_spend_df_rows != proj_horizon_editor_val or 'proj_cpqr_df_cache' not in st.session_state: 
              st.session_state.proj_cpqr_df_cache = pd.DataFrame({'Month': future_months_ui_for_editor.strftime('%Y-%m'), 'Assumed_CPQR': [default_cpqr_value] * proj_horizon_editor_val})
-        
         edited_cpqr_df = st.data_editor(st.session_state.proj_cpqr_df_cache, key='proj_cpqr_editor_v5', use_container_width=True, num_rows="fixed")
-        if not edited_cpqr_df.equals(st.session_state.proj_cpqr_df_cache): st.session_state.proj_cpqr_df_cache = edited_cpqr_df # Persist
-
+        if not edited_cpqr_df.equals(st.session_state.proj_cpqr_df_cache): st.session_state.proj_cpqr_df_cache = edited_cpqr_df 
         proj_cpqr_dict_sidebar = {m_init_cpqr: default_cpqr_value for m_init_cpqr in future_months_ui_for_editor}
         if 'Month' in edited_cpqr_df.columns and 'Assumed_CPQR' in edited_cpqr_df.columns:
             for index, row_cpqr in edited_cpqr_df.iterrows():
                 try:
                     month_str_cpqr = str(row_cpqr['Month']).strip(); cpqr_val = float(row_cpqr['Assumed_CPQR'])
                     month_period_cpqr = pd.Period(month_str_cpqr, freq='M')
-                    if cpqr_val <=0: cpqr_val = default_cpqr_value # Ensure positive
+                    if cpqr_val <=0: cpqr_val = default_cpqr_value 
                     if month_period_cpqr in proj_cpqr_dict_sidebar: proj_cpqr_dict_sidebar[month_period_cpqr] = cpqr_val
                 except Exception: pass
-
         st.write("Conversion Rate Assumption (Projections Tab):")
         rate_assumption_method_sidebar = st.radio( "Use Rates Based On:", ('Manual Input Below', 'Rolling Historical Average'), key='rate_method_v2', horizontal=True )
         manual_proj_conv_rates_sidebar = {}
         cols_rate = st.columns(2)
-        # Using global stage constants for keys
         with cols_rate[0]:
              manual_proj_conv_rates_sidebar[f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}"] = st.slider("Manual: POF -> PreScreen %", 0.0, 100.0, 100.0, step=0.1, format="%.1f%%", key='cr_qps_v2') / 100.0
              manual_proj_conv_rates_sidebar[f"{STAGE_PRE_SCREENING_ACTIVITIES} -> {STAGE_SENT_TO_SITE}"] = st.slider("Manual: PreScreen -> StS %", 0.0, 100.0, 17.0, step=0.1, format="%.1f%%", key='cr_pssts_v2') / 100.0
         with cols_rate[1]:
              manual_proj_conv_rates_sidebar[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("Manual: StS -> Appt %", 0.0, 100.0, 33.0, step=0.1, format="%.1f%%", key='cr_sa_v2') / 100.0
              manual_proj_conv_rates_sidebar[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("Manual: Appt -> ICF %", 0.0, 100.0, 35.0, step=0.1, format="%.1f%%", key='cr_ai_v2') / 100.0
-        
         use_rolling_flag_sidebar = (rate_assumption_method_sidebar == 'Rolling Historical Average')
         if use_rolling_flag_sidebar:
             rolling_window_months_sidebar = st.selectbox("Select Rolling Window (Months):", [1, 3, 6], index=1, key='rolling_window_v2')
             if st.session_state.data_processed_successfully and st.session_state.referral_data_processed is not None and \
                st.session_state.ordered_stages is not None and st.session_state.ts_col_map is not None:
-                determine_effective_projection_rates( # Call the function to display/calculate
+                determine_effective_projection_rates( 
                     st.session_state.referral_data_processed, st.session_state.ordered_stages,
                     st.session_state.ts_col_map, rate_assumption_method_sidebar,
-                    rolling_window_months_sidebar, manual_proj_conv_rates_sidebar, # Pass current manual rates
+                    rolling_window_months_sidebar, manual_proj_conv_rates_sidebar, 
                     st.session_state.get('inter_stage_lags', {}), sidebar_display_area=st.sidebar)
             else: st.sidebar.caption("Upload data to view calculated rolling rates.")
         else: rolling_window_months_sidebar = 0; st.sidebar.caption("Using manually input rates above for Projections tab.")
-
         st.markdown("---")
         st.subheader("Projection Sensitivity (Shared)")
         proj_icf_variation_percent_sidebar = st.slider(
@@ -1293,24 +1156,21 @@ with st.sidebar:
 
 # --- Main App Logic & Display ---
 if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
-    # ... (Data loading and preprocessing logic - UNCHANGED from previous version) ...
     if not st.session_state.data_processed_successfully:
         funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
         if funnel_definition and ordered_stages and ts_col_map:
             st.session_state.funnel_definition = funnel_definition; st.session_state.ordered_stages = ordered_stages; st.session_state.ts_col_map = ts_col_map
-            try: # Ensure referral file is read after funnel def is parsed
+            try: 
                  bytes_data_ref = uploaded_referral_file.getvalue()
                  try: decoded_data_ref = bytes_data_ref.decode("utf-8")
-                 except UnicodeDecodeError: decoded_data_ref = bytes_data_ref.decode("latin-1", errors="replace") # More robust decoding
+                 except UnicodeDecodeError: decoded_data_ref = bytes_data_ref.decode("latin-1", errors="replace") 
                  stringio_ref = io.StringIO(decoded_data_ref)
                  try:
                       referrals_raw_df_main = pd.read_csv(stringio_ref, sep=',', header=0, on_bad_lines='warn', low_memory=False)
                       st.session_state.referral_data_processed = preprocess_referral_data(referrals_raw_df_main, funnel_definition, ordered_stages, ts_col_map)
                       if st.session_state.referral_data_processed is not None and not st.session_state.referral_data_processed.empty:
                            st.session_state.data_processed_successfully = True
-                           # Calculate inter-stage lags once after successful processing
                            st.session_state.inter_stage_lags = calculate_overall_inter_stage_lags(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
-                           # Calculate site metrics once
                            st.session_state.site_metrics_calculated = calculate_site_metrics(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
                       else: st.session_state.data_processed_successfully = False; st.error("Referral data preprocessing failed or returned empty.")
                  except pd.errors.ParserError as pe: st.error(f"Error parsing referral CSV file: {pe}. Check file format and delimiter."); st.exception(pe)
@@ -1318,25 +1178,19 @@ if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
             except Exception as e: st.error(f"Error loading referral data: {e}"); st.exception(e)
         else: st.error("Funnel definition parsing failed. Cannot proceed with referral data.")
 
-
 if st.session_state.data_processed_successfully:
     referral_data_processed = st.session_state.referral_data_processed
-    funnel_definition = st.session_state.funnel_definition # Not directly used below but good to have
     ordered_stages = st.session_state.ordered_stages
     ts_col_map = st.session_state.ts_col_map
     inter_stage_lags_data = st.session_state.get('inter_stage_lags', {})
     site_metrics_calculated_data = st.session_state.get('site_metrics_calculated', pd.DataFrame())
 
-
     if "success_message_shown" not in st.session_state and referral_data_processed is not None:
         st.success("Data loaded and preprocessed successfully!"); st.session_state.success_message_shown = True
-    
     st.markdown("---")
-    # --- MODIFIED: Added "🤖 AI Forecast" tab ---
     tab1, tab2, tab3, tab_ai = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections", "🤖 AI Forecast"])
 
-    with tab1: # ProForma
-        # ... (ProForma Tab Display Logic - UNCHANGED from previous version) ...
+    with tab1: 
         st.header("Monthly ProForma (Historical Cohorts)")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and ad_spend_input_dict:
             proforma_df_tab1 = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict)
@@ -1349,8 +1203,7 @@ if st.session_state.data_processed_successfully:
             else: st.warning("Could not generate ProForma table (check historical ad spend for relevant months).")
         else: st.warning("ProForma cannot be calculated until data is loaded and historical ad spend is entered.")
 
-    with tab2: # Site Performance
-        # ... (Site Performance Tab Display Logic - UNCHANGED from previous version) ...
+    with tab2: 
         st.header("Site Performance Ranking")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized and not site_metrics_calculated_data.empty:
             ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized)
@@ -1365,7 +1218,7 @@ if st.session_state.data_processed_successfully:
                 for col_fmt in final_ranked_display_tab2.columns:
                     if '%' in col_fmt: final_ranked_display_tab2[col_fmt] = final_ranked_display_tab2[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
                     elif 'Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt: final_ranked_display_tab2[col_fmt] = final_ranked_display_tab2[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
-                    elif 'Count' in col_fmt or 'Qualified' in col_fmt : final_ranked_display_tab2[col_fmt] = final_ranked_display_tab2[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-') # Check for NaN before int
+                    elif 'Count' in col_fmt or 'Qualified' in col_fmt : final_ranked_display_tab2[col_fmt] = final_ranked_display_tab2[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-') 
                 st.dataframe(final_ranked_display_tab2.style.format(na_rep='-'))
                 try: csv_tab2 = final_ranked_display_tab2.to_csv(index=False).encode('utf-8'); st.download_button(label="Download Site Ranking", data=csv_tab2, file_name='site_ranking.csv', mime='text/csv', key='dl_sites_v2')
                 except Exception as e_dl2: st.warning(f"Site ranking download error: {e_dl2}")
@@ -1373,30 +1226,25 @@ if st.session_state.data_processed_successfully:
         elif site_metrics_calculated_data.empty: st.warning("Site metrics have not been calculated (e.g. no 'Site' column in data or error during calculation). Site performance cannot be shown.")
         else: st.warning("Site performance cannot be ranked until data is loaded and weights are set.")
 
-
-    with tab3: # Projections
-        # ... (Projections Tab Display Logic - UNCHANGED from previous version) ...
+    with tab3: 
         st.header("Projections (Based on Future Spend)")
-        # Determine effective rates for this tab (could be manual or rolling)
         effective_proj_rates_tab3, method_desc_tab3 = determine_effective_projection_rates(
             referral_data_processed, ordered_stages, ts_col_map, rate_assumption_method_sidebar,
-            rolling_window_months_sidebar, manual_proj_conv_rates_sidebar, inter_stage_lags_data, sidebar_display_area=None) # No sidebar area for main tab display
-        
+            rolling_window_months_sidebar, manual_proj_conv_rates_sidebar, inter_stage_lags_data, sidebar_display_area=None) 
         st.caption(f"**Projection Using: {method_desc_tab3} Conversion Rates**")
         if "Rolling" in method_desc_tab3 and not any(s in method_desc_tab3 for s in ["Failed", "No History", "Error"]):
             if isinstance(effective_proj_rates_tab3, dict) and effective_proj_rates_tab3:
                 st.markdown("---"); st.write("Effective Rolling Rates Applied for this Projection (Adj. & Matured):")
                 for key_r, val_r in effective_proj_rates_tab3.items():
-                     if key_r in manual_proj_conv_rates_sidebar: st.text(f"- {key_r}: {val_r*100:.1f}%") # Show the rates used
+                     if key_r in manual_proj_conv_rates_sidebar: st.text(f"- {key_r}: {val_r*100:.1f}%") 
         st.markdown("---")
         with st.expander("View Calculated Average Inter-Stage Lags & Maturity Periods Used (for Rolling Rates)"):
-            # ... (Lag display logic - UNCHANGED) ...
             if inter_stage_lags_data:
                 lag_df_list_tab3 = []
-                temp_maturity_periods_display_tab3 = {} # Recalculate for display clarity
+                temp_maturity_periods_display_tab3 = {} 
                 display_maturity_lag_multiplier_tab3 = 1.5; display_min_effective_maturity_tab3 = 20; display_default_maturity_tab3 = 45
-                if inter_stage_lags_data: # Check again, belt and suspenders
-                    for r_key_disp_tab3 in manual_proj_conv_rates_sidebar.keys(): # These are the segments for which rates are projected
+                if inter_stage_lags_data: 
+                    for r_key_disp_tab3 in manual_proj_conv_rates_sidebar.keys(): 
                         avg_lag_disp_tab3 = inter_stage_lags_data.get(r_key_disp_tab3)
                         if pd.notna(avg_lag_disp_tab3) and avg_lag_disp_tab3 > 0:
                             calc_mat_disp_tab3 = round(display_maturity_lag_multiplier_tab3 * avg_lag_disp_tab3)
@@ -1410,10 +1258,9 @@ if st.session_state.data_processed_successfully:
                 else: st.caption("No inter-stage lags calculated or available.")
             else: st.caption("Inter-stage lags have not been calculated (required for rolling rate maturity).")
         st.markdown("---")
-        
         projection_inputs_tab3 = {
             'horizon': proj_horizon_sidebar, 'spend_dict': proj_spend_dict_sidebar,
-            'cpqr_dict': proj_cpqr_dict_sidebar, 'final_conv_rates': effective_proj_rates_tab3, # Use determined rates
+            'cpqr_dict': proj_cpqr_dict_sidebar, 'final_conv_rates': effective_proj_rates_tab3, 
             'goal_icf': goal_icf_count_sidebar, 'site_performance_data': site_metrics_calculated_data,
             'inter_stage_lags': inter_stage_lags_data,
             'icf_variation_percentage': proj_icf_variation_percent_sidebar
@@ -1429,10 +1276,8 @@ if st.session_state.data_processed_successfully:
         if pd.notna(avg_lag_used_tab3): st.caption(f"Lag applied in projections: **{avg_lag_used_tab3:.1f} days**. ({lag_msg_tab3})")
         else: st.caption(f"Lag could not be determined. ({lag_msg_tab3})")
         st.markdown("---")
-        
         if projection_results_df_tab3 is not None and not projection_results_df_tab3.empty:
             st.subheader("Projected Monthly ICFs & Cohort CPICF")
-            # ... (Display logic for projection_results_df_tab3 - UNCHANGED, uses existing formatting for CPICF range) ...
             cols_to_check_cpicf_tab3 = ['Projected_CPICF_Cohort_Source_Low', 'Projected_CPICF_Cohort_Source_Mean', 'Projected_CPICF_Cohort_Source_High']
             base_display_cols_proj_tab3 = ['Forecasted_Ad_Spend', 'Forecasted_Qual_Referrals', 'Projected_ICF_Landed']
             results_display_tab3 = projection_results_df_tab3.copy()
@@ -1443,12 +1288,11 @@ if st.session_state.data_processed_successfully:
                                  else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"))
                                 if proj_icf_variation_percent_sidebar > 0 else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
                 final_display_cols_proj_tab3 = base_display_cols_proj_tab3 + ['Projected CPICF (Low-Mean-High)']
-            elif 'Projected_CPICF_Cohort_Source_Mean' in results_display_tab3.columns: # Fallback if only mean exists
+            elif 'Projected_CPICF_Cohort_Source_Mean' in results_display_tab3.columns: 
                 results_display_tab3.rename(columns={'Projected_CPICF_Cohort_Source_Mean': 'Projected CPICF (Mean)'}, inplace=True)
                 results_display_tab3['Projected CPICF (Mean)'] = results_display_tab3['Projected CPICF (Mean)'].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else '-')
                 final_display_cols_proj_tab3 = base_display_cols_proj_tab3 + ['Projected CPICF (Mean)']
-            else: final_display_cols_proj_tab3 = base_display_cols_proj_tab3 # Should not happen
-            
+            else: final_display_cols_proj_tab3 = base_display_cols_proj_tab3
             results_display_filtered_tab3 = results_display_tab3[[col for col in final_display_cols_proj_tab3 if col in results_display_tab3.columns]].copy()
             if not results_display_filtered_tab3.empty:
                 results_display_filtered_tab3.index = results_display_filtered_tab3.index.strftime('%Y-%m')
@@ -1467,22 +1311,16 @@ if st.session_state.data_processed_successfully:
                 except Exception as e_dl3: st.warning(f"Projection download error: {e_dl3}")
             else: st.warning("Projection results table is empty after selecting columns.")
         else: st.warning("Could not calculate projections for Projections Tab.")
-        
         st.markdown("---"); st.subheader("Site-Level Monthly Projections (Projections Tab - Editable)")
         if site_level_proj_tab3 is not None and not site_level_proj_tab3.empty:
-            # ... (Display logic for site_level_proj_tab3 - UNCHANGED) ...
             display_site_df_main_tab3 = site_level_proj_tab3.copy()
-            if display_site_df_main_tab3.index.name == 'Site': display_site_df_main_tab3.reset_index(inplace=True) # Ensure 'Site' is a column
+            if display_site_df_main_tab3.index.name == 'Site': display_site_df_main_tab3.reset_index(inplace=True) 
             else: display_site_df_main_tab3.index.name = 'Site'; display_site_df_main_tab3.reset_index(inplace=True)
-
-
             editable_sites_df_tab3 = display_site_df_main_tab3[display_site_df_main_tab3['Site'] != 'Grand Total'].copy() if 'Site' in display_site_df_main_tab3.columns else display_site_df_main_tab3.drop(index='Grand Total', errors='ignore').copy()
             total_row_df_display_tab3 = display_site_df_main_tab3[display_site_df_main_tab3['Site'] == 'Grand Total'] if 'Site' in display_site_df_main_tab3.columns else (display_site_df_main_tab3.loc[['Grand Total']] if 'Grand Total' in display_site_df_main_tab3.index else pd.DataFrame())
-            
-            if 'Site' in editable_sites_df_tab3.columns: # Ensure 'Site' is first for editor
+            if 'Site' in editable_sites_df_tab3.columns: 
                 cols_site_editor_tab3 = ['Site'] + [col for col in editable_sites_df_tab3.columns if col != 'Site']
                 editable_sites_df_tab3 = editable_sites_df_tab3[cols_site_editor_tab3]
-            
             edited_site_level_df_tab3 = st.data_editor(editable_sites_df_tab3, use_container_width=True, key="site_level_editor_v2", num_rows="dynamic")
             if not total_row_df_display_tab3.empty:
                 st.caption("Totals (based on initial calculation, not live edits from above table):")
@@ -1491,92 +1329,56 @@ if st.session_state.data_processed_successfully:
             except Exception as e_dl_site3: st.warning(f"Site projection download error: {e_dl_site3}")
         else: st.info("Site-level projection data (Projections Tab) is not available or is empty.")
 
-    # --- NEW AI FORECAST TAB ---
     with tab_ai:
         st.header("🤖 AI Forecast (Goal-Based)")
         st.info("Define your recruitment goals, and the tool will estimate a plan. Assumes Cost Per Qualified Lead (POF) is consistent unless advanced options are used (future feature).")
-
         ai_cols = st.columns(3)
         with ai_cols[0]:
             ai_goal_lpi_date = st.date_input(
-                "Target LPI Date", 
-                value=datetime.now() + pd.DateOffset(months=12), 
-                min_value=datetime.now() + pd.DateOffset(months=1),
-                key="ai_lpi_date"
+                "Target LPI Date", value=datetime.now() + pd.DateOffset(months=12), 
+                min_value=datetime.now() + pd.DateOffset(months=1), key="ai_lpi_date"
             )
         with ai_cols[1]:
             ai_goal_icf_num = st.number_input("Target Total ICFs", min_value=1, value=100, step=10, key="ai_icf_num")
         with ai_cols[2]:
             ai_cpql_estimate = st.number_input(
-                "Estimated Cost Per Qualified Lead (POF)", 
-                min_value=1.0, value=75.0, step=5.0, format="%.2f", key="ai_cpql",
+                "Estimated Cost Per Qualified Lead (POF)", min_value=1.0, value=75.0, step=5.0, format="%.2f", key="ai_cpql",
                 help="Your average cost to get one lead to the 'Passed Online Form' (or equivalent first funnel) stage."
             )
-        
-        # Get necessary data for AI forecast (similar to Projections tab but specific needs)
-        # Use overall historical rates for Step 1 of AI forecast
-        # Later, this could be a user choice (1,3,6 mo rolling, manual for AI)
         ai_effective_rates, ai_rates_method_desc = determine_effective_projection_rates(
-            referral_data_processed, ordered_stages, ts_col_map, 
-            'Rolling Historical Average', 6, # For Step 1, let's default to 6-month rolling
-            manual_proj_conv_rates_sidebar, # Pass manual as fallback if rolling fails
-            inter_stage_lags_data, 
-            sidebar_display_area=None # No sidebar display for this internal call
+            referral_data_processed, ordered_stages, ts_col_map, 'Rolling Historical Average', 6, 
+            manual_proj_conv_rates_sidebar, inter_stage_lags_data, sidebar_display_area=None
         )
-        if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc:
-            st.warning(f"Could not determine reliable historical rates for AI Forecast ({ai_rates_method_desc}). Forecast may be less accurate or use fallbacks.")
-            # Fallback to manual rates from sidebar if rolling fails completely
-            if not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()): # Check if empty or all zero
-                 ai_effective_rates = manual_proj_conv_rates_sidebar
-                 ai_rates_method_desc = "Manual (Fallback)"
-                 st.caption("AI Forecast using manual rates from sidebar due to issues with historical rate calculation.")
-
-
-        # Get overall POF to ICF lag from the main projection calculation's output
-        # This requires the main projection to have run or its lag calculation part
-        # For simplicity, let's recalculate the specific lag needed (POF to ICF) if not readily available
-        # Or, ensure calculate_projections is called first or its relevant sub-parts.
-        # For Step 1, let's assume avg_lag_used_tab3 (from Projections tab) is a good proxy
-        # This creates a dependency, might need a dedicated lag calculation for AI tab later.
+        if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc or not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()):
+            st.warning(f"Could not determine reliable historical rates for AI Forecast ({ai_rates_method_desc}). Using manual rates from sidebar as fallback.")
+            ai_effective_rates = manual_proj_conv_rates_sidebar
+            ai_rates_method_desc = "Manual (Fallback)"
         
-        # Simplified: Directly calculate POF to ICF lag here for AI tab robustness
         pof_ts_col_ai = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
         icf_ts_col_ai = ts_col_map.get(STAGE_SIGNED_ICF)
         avg_pof_icf_lag_ai = np.nan
         if pof_ts_col_ai and icf_ts_col_ai and pof_ts_col_ai in referral_data_processed.columns and icf_ts_col_ai in referral_data_processed.columns:
             avg_pof_icf_lag_ai = calculate_avg_lag_generic(referral_data_processed, pof_ts_col_ai, icf_ts_col_ai)
-        
-        if pd.isna(avg_pof_icf_lag_ai): # Fallback if specific lag calc failed
-            avg_pof_icf_lag_ai = avg_lag_used_tab3 if 'avg_lag_used_tab3' in locals() and pd.notna(avg_lag_used_tab3) else 30.0 # Default
-            st.caption(f"AI Forecast using fallback POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days.")
+        if pd.isna(avg_pof_icf_lag_ai): 
+            avg_pof_icf_lag_ai = avg_lag_used_tab3 if 'avg_lag_used_tab3' in locals() and pd.notna(avg_lag_used_tab3) else 30.0
+            st.caption(f"AI Forecast using fallback POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days. Rates: {ai_rates_method_desc}")
         else:
             st.caption(f"AI Forecast using calculated POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days. Rates based on: {ai_rates_method_desc}")
-
 
         if st.button("🚀 Generate AI Forecast", key="run_ai_forecast"):
             if pd.isna(avg_pof_icf_lag_ai):
                 st.error("Cannot run AI Forecast: Average POF to ICF lag is not available.")
             else:
                 ai_results_df, ai_site_df, ai_ads_off, ai_message, ai_unfeasible = calculate_ai_forecast_core(
-                    goal_lpi_date_dt=ai_goal_lpi_date,
-                    goal_icf_number=ai_goal_icf_num,
-                    estimated_cpql=ai_cpql_estimate,
-                    icf_variation_percent=proj_icf_variation_percent_sidebar, # Shared sensitivity
-                    processed_df=referral_data_processed,
-                    ordered_stages=ordered_stages,
-                    ts_col_map=ts_col_map,
-                    effective_projection_conv_rates=ai_effective_rates, # Use determined rates
-                    avg_overall_lag_days=avg_pof_icf_lag_ai, # Use specific POF-ICF lag
-                    site_metrics_df=site_metrics_calculated_data, # Pass pre-calculated site metrics
-                    projection_horizon_months = proj_horizon_sidebar # Use main projection horizon for now
+                    goal_lpi_date_dt=ai_goal_lpi_date, goal_icf_number=ai_goal_icf_num,
+                    estimated_cpql=ai_cpql_estimate, icf_variation_percent=proj_icf_variation_percent_sidebar,
+                    processed_df=referral_data_processed, ordered_stages=ordered_stages, ts_col_map=ts_col_map,
+                    effective_projection_conv_rates=ai_effective_rates, avg_overall_lag_days=avg_pof_icf_lag_ai,
+                    site_metrics_df=site_metrics_calculated_data, projection_horizon_months = proj_horizon_sidebar
                 )
-
                 st.markdown("---")
-                if ai_unfeasible:
-                    st.warning(f"Feasibility Note: {ai_message}")
-                else:
-                    st.success(f"Forecast Status: {ai_message}")
-
+                if ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
+                else: st.success(f"Forecast Status: {ai_message}")
                 ai_col1, ai_col2, ai_col3 = st.columns(3)
                 ai_col1.metric("Target LPI Date", ai_goal_lpi_date.strftime("%Y-%m-%d"))
                 ai_col2.metric("Target ICFs", f"{ai_goal_icf_num:,}")
@@ -1584,48 +1386,49 @@ if st.session_state.data_processed_successfully:
 
                 if not ai_results_df.empty:
                     st.subheader("AI Forecasted Monthly Performance")
-                    # Formatting for display (similar to Projections tab)
                     ai_display_df = ai_results_df.copy()
                     ai_display_df.index = ai_display_df.index.strftime('%Y-%m')
-                    # Apply CPICF range formatting
                     if all(c in ai_display_df.columns for c in ['Projected_CPICF_Cohort_Source_Low', 'Projected_CPICF_Cohort_Source_Mean', 'Projected_CPICF_Cohort_Source_High']):
                         ai_display_df['Projected CPICF (Low-Mean-High)'] = ai_display_df.apply(
                             lambda row: (f"${row['Projected_CPICF_Cohort_Source_Low']:,.2f} - ${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} - ${row['Projected_CPICF_Cohort_Source_High']:,.2f}"
-                                 if pd.notna(row['Projected_CPICF_Cohort_Source_Low']) # etc.
+                                 if pd.notna(row['Projected_CPICF_Cohort_Source_Low']) and pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) and pd.notna(row['Projected_CPICF_Cohort_Source_High'])
                                  else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"))
                                 if proj_icf_variation_percent_sidebar > 0 else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
                         cols_to_show_ai = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected CPICF (Low-Mean-High)']
-                    else: # Fallback if range cols not present
+                    else: 
                         cols_to_show_ai = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected_CPICF_Cohort_Source_Mean']
                         if 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df.columns:
                              ai_display_df.rename(columns={'Projected_CPICF_Cohort_Source_Mean':'Projected CPICF (Mean)'}, inplace=True)
                              ai_display_df['Projected CPICF (Mean)'] = ai_display_df['Projected CPICF (Mean)'].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else '-')
-
-
                     ai_display_df_filtered = ai_display_df[[col for col in cols_to_show_ai if col in ai_display_df.columns]].copy()
-                    # Format other columns
                     for col_n_ai in ai_display_df_filtered.columns:
                         if 'Ad_Spend' in col_n_ai : ai_display_df_filtered[col_n_ai] = ai_display_df_filtered[col_n_ai].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int,float)) and pd.notna(x) else (x if isinstance(x,str) else '-'))
                         elif 'QLs_POF' in col_n_ai or 'ICF_Landed' in col_n_ai: ai_display_df_filtered[col_n_ai] = ai_display_df_filtered[col_n_ai].apply(lambda x: f"{int(x):,}" if pd.notna(x) and isinstance(x,(int,float)) else (x if isinstance(x,str) else '-'))
-                    
                     st.dataframe(ai_display_df_filtered.style.format(na_rep='-'))
                     if proj_icf_variation_percent_sidebar > 0 and 'Projected CPICF (Low-Mean-High)' in ai_display_df_filtered.columns:
                         st.caption(f"Note: CPICF range based on +/- {proj_icf_variation_percent_sidebar}% ICF variation (set in sidebar).")
-
-
                     st.subheader("Projected ICFs Landed Over Time (AI Forecast)")
                     ai_chart_data = ai_results_df[['Projected_ICF_Landed']].copy()
                     if isinstance(ai_chart_data.index, pd.PeriodIndex): ai_chart_data.index = ai_chart_data.index.to_timestamp()
                     ai_chart_data['Projected_ICF_Landed'] = pd.to_numeric(ai_chart_data['Projected_ICF_Landed'], errors='coerce').fillna(0)
                     st.line_chart(ai_chart_data)
-
                 if not ai_site_df.empty:
                     st.subheader("AI Forecasted Site-Level Performance")
-                    # Similar display formatting as main site projections tab
-                    st.dataframe(ai_site_df.style.format("{:,.0f}", na_rep='-')) # Basic formatting for now
+                    ai_site_df_displayable = ai_site_df.copy()
+                    # Make sure index is 'Site' if it's not already for display
+                    if ai_site_df_displayable.index.name != 'Site' and 'Site' in ai_site_df_displayable.columns:
+                        ai_site_df_displayable.set_index('Site', inplace=True)
+                    elif ai_site_df_displayable.index.name != 'Site' and 'Site' not in ai_site_df_displayable.columns:
+                         pass # Index is likely already site names, or it's 'Grand Total' only
+                    
+                    # Basic formatting for site table - can be enhanced
+                    formatted_site_df_ai = ai_site_df_displayable.copy()
+                    for col_site_ai in formatted_site_df_ai.columns:
+                        if isinstance(col_site_ai, tuple) and 'Projected QLs (POF)' in col_site_ai[1] or 'Projected ICFs Landed' in col_site_ai[1]:
+                            formatted_site_df_ai[col_site_ai] = formatted_site_df_ai[col_site_ai].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
+
+                    st.dataframe(formatted_site_df_ai.style.format(na_rep='-'))
                 else: st.info("Site-level AI forecast not available or sites not defined.")
         else: st.caption("Click the button above to generate the AI forecast based on your goals.")
-
-
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
