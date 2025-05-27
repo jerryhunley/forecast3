@@ -353,9 +353,11 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     
     MIN_DENOMINATOR_FOR_RATE_CALC = 5 
     DEFAULT_MATURITY_DAYS = 45 
-    # --- Parameters for maturity calculation ---
-    MATURITY_LAG_MULTIPLIER = 1.5 # Using 1.5x average lag
-    MIN_EFFECTIVE_MATURITY_DAYS = 20 # Ensure maturity is at least this many days
+    MATURITY_LAG_MULTIPLIER = 1.5 
+    MIN_EFFECTIVE_MATURITY_DAYS = 20 
+    # --- NEW: Minimum total denominator for overall historical rate to be considered reliable ---
+    MIN_TOTAL_DENOMINATOR_FOR_OVERALL_RATE = 20 
+
 
     if _processed_df is None or _processed_df.empty: 
         if sidebar_display_area: sidebar_display_area.caption("Using manual rates (No historical data for rolling).")
@@ -373,16 +375,15 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
     if inter_stage_lags_for_maturity:
         for rate_key_for_lag in manual_rates_sidebar.keys():
             avg_lag_for_key = inter_stage_lags_for_maturity.get(rate_key_for_lag)
-            
             if pd.notna(avg_lag_for_key) and avg_lag_for_key > 0:
                 calculated_maturity = round(MATURITY_LAG_MULTIPLIER * avg_lag_for_key)
                 current_maturity_period = max(calculated_maturity, MIN_EFFECTIVE_MATURITY_DAYS)
                 MATURITY_PERIODS_DAYS[rate_key_for_lag] = current_maturity_period
-                if current_maturity_period == MIN_EFFECTIVE_MATURITY_DAYS and calculated_maturity < MIN_EFFECTIVE_MATURITY_DAYS:
-                    substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Calc'd {calculated_maturity}d ({MATURITY_LAG_MULTIPLIER}x{avg_lag_for_key:.1f}d), but used min {MIN_EFFECTIVE_MATURITY_DAYS}d.")
-                elif current_maturity_period == calculated_maturity : # No capping applied
-                     substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Set to {current_maturity_period}d ({MATURITY_LAG_MULTIPLIER}x{avg_lag_for_key:.1f}d).")
-
+                # Log how maturity was set (optional, can make log lengthy)
+                # if current_maturity_period == MIN_EFFECTIVE_MATURITY_DAYS and calculated_maturity < MIN_EFFECTIVE_MATURITY_DAYS:
+                #     substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Calc'd {calculated_maturity}d ({MATURITY_LAG_MULTIPLIER}x{avg_lag_for_key:.1f}d), but used min {MIN_EFFECTIVE_MATURITY_DAYS}d.")
+                # elif current_maturity_period == calculated_maturity :
+                #      substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Set to {current_maturity_period}d ({MATURITY_LAG_MULTIPLIER}x{avg_lag_for_key:.1f}d).")
             else:
                 MATURITY_PERIODS_DAYS[rate_key_for_lag] = DEFAULT_MATURITY_DAYS
                 substitutions_made_log.append(f"Maturity for '{rate_key_for_lag}': Avg lag N/A or zero, used default {DEFAULT_MATURITY_DAYS} days.")
@@ -436,16 +437,29 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
                         months_used_for_rate.append(month_period)
                         numerator_val = hist_counts.loc[month_period, col_to_cleaned_name]
                         denominator_val = hist_counts.loc[month_period, actual_col_from]
-                        rate_for_this_month = 0.0 
+                        rate_for_this_month = 0.0 # Initialize
+                        
                         if denominator_val < MIN_DENOMINATOR_FOR_RATE_CALC:
-                            if pd.notna(overall_hist_rate_for_key):
-                                rate_for_this_month = overall_hist_rate_for_key
-                                substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, used overall hist. rate ({rate_for_this_month*100:.1f}%). Maturity: {maturity_days_for_this_rate}d.")
-                            else:
-                                rate_for_this_month = manual_rate_for_key
-                                substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, overall N/A, used manual rate ({rate_for_this_month*100:.1f}%). Maturity: {maturity_days_for_this_rate}d.")
+                            # --- MODIFIED FALLBACK LOGIC ---
+                            rate_for_this_month = manual_rate_for_key # Default to user's manual input first
+                            log_reason_detail = f"used manual rate ({manual_rate_for_key*100:.1f}%)"
+
+                            is_manual_rate_placeholder = (manual_rate_for_key >= 0.99 or manual_rate_for_key <= 0.01)
+
+                            if is_manual_rate_placeholder:
+                                if pd.notna(overall_hist_rate_for_key) and total_denominator >= MIN_TOTAL_DENOMINATOR_FOR_OVERALL_RATE:
+                                    rate_for_this_month = overall_hist_rate_for_key
+                                    log_reason_detail = f"manual was placeholder, used overall hist. rate ({overall_hist_rate_for_key*100:.1f}%, total N={total_denominator})"
+                                else:
+                                    # Manual was placeholder, but overall hist. unreliable or N/A, stick with manual placeholder
+                                    log_reason_detail = f"manual was placeholder, overall hist. rate N/A or low total N ({total_denominator}), stuck with manual ({manual_rate_for_key*100:.1f}%)"
+                            # If manual rate is not a placeholder, we've already set rate_for_this_month to it.
+                            
+                            substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Denom ({denominator_val}) < {MIN_DENOMINATOR_FOR_RATE_CALC}, {log_reason_detail}. Maturity: {maturity_days_for_this_rate}d.")
+                            # --- END MODIFIED FALLBACK LOGIC ---
                         elif denominator_val > 0:
                             rate_for_this_month = numerator_val / denominator_val
+                        
                         adjusted_monthly_rates_list.append(rate_for_this_month)
                     else:
                         substitutions_made_log.append(f"Mth {month_period.strftime('%Y-%m')} for '{rate_key}': Excluded (too recent, current maturity: {maturity_days_for_this_rate} days).")
@@ -483,8 +497,11 @@ def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_m
         if sidebar_display_area and substitutions_made_log:
             with sidebar_display_area.expander("Rolling Rate Calculation Log (Adjustments & Maturity)", expanded=False):
                 sidebar_display_area.caption("Maturity Periods Applied (Days):")
-                for r_key_disp, mat_days_disp in MATURITY_PERIODS_DAYS.items():
-                    sidebar_display_area.caption(f"- {r_key_disp}: {mat_days_disp} days")
+                if MATURITY_PERIODS_DAYS: # Check if dict is not empty
+                    for r_key_disp, mat_days_disp in MATURITY_PERIODS_DAYS.items():
+                        sidebar_display_area.caption(f"- {r_key_disp}: {mat_days_disp} days")
+                else:
+                    sidebar_display_area.caption("Maturity periods not determined (e.g. no inter-stage lags).")
                 sidebar_display_area.caption("--- Substitution/Exclusion Log ---")
                 for log_entry in substitutions_made_log:
                     st.caption(log_entry)
