@@ -21,7 +21,6 @@ STAGE_SIGNED_ICF = "Signed ICF"
 STAGE_SCREEN_FAILED = "Screen Failed" # Example, if used in metrics
 
 # --- Helper Functions ---
-# ... (parse_funnel_definition, parse_datetime_with_timezone, parse_history_string, get_stage_timestamps - UNCHANGED) ...
 @st.cache_data
 def parse_funnel_definition(uploaded_file):
     if uploaded_file is None: return None, None, None
@@ -362,7 +361,7 @@ def score_sites(_site_metrics_df, weights):
                  site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_grade_fallback)
             site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A')
         elif len(site_metrics_df_indexed) == 1: 
-            def assign_single_site_grade(score_value): # CORRECTED THIS FUNCTION
+            def assign_single_site_grade(score_value):
                 if pd.isna(score_value): return 'N/A'
                 score_value = round(score_value)
                 if score_value >= 90: return 'A'
@@ -832,7 +831,7 @@ def calculate_ai_forecast_core(
     display_end_month = final_proj_end_month
     if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df and not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].empty:
         lpi_achieved_month_for_trim = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= goal_icf_number].index.min()
-        display_end_month = min(final_proj_end_month, lpi_achieved_month_for_trim + pd.offsets.MonthEnd(3)) # Ensure display_end_month is a Period
+        display_end_month = min(final_proj_end_month, lpi_achieved_month_for_trim + pd.offsets.MonthEnd(3)) 
     ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month].copy() if not ai_results_df.empty else pd.DataFrame()
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final, is_unfeasible_final
 
@@ -1105,65 +1104,52 @@ if st.session_state.data_processed_successfully:
             else: st.warning("Projection results table is empty after selecting columns.")
         else: st.warning("Could not calculate projections for Projections Tab.")
         st.markdown("---"); st.subheader("Site-Level Monthly Projections (Projections Tab - Editable)")
-        
-        # --- CORRECTED SECTION for Tab 3 Site Level Projections ---
         if site_level_proj_tab3 is not None and not site_level_proj_tab3.empty:
             df_for_editor_tab3 = site_level_proj_tab3.copy()
-            
-            # If index is 'Site', reset it. Also handles if 'Site' is already a column.
-            if df_for_editor_tab3.index.name == 'Site':
-                df_for_editor_tab3.reset_index(inplace=True)
-            
-            # Separate Grand Total row before flattening columns
+            if df_for_editor_tab3.index.name == 'Site': df_for_editor_tab3.reset_index(inplace=True)
             grand_total_row_tab3 = None
             if 'Site' in df_for_editor_tab3.columns and "Grand Total" in df_for_editor_tab3['Site'].values:
-                grand_total_row_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] == "Grand Total"]
-                df_for_editor_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] != "Grand Total"]
-            elif "Grand Total" in df_for_editor_tab3.index: # If Grand Total is in index
-                grand_total_row_tab3 = df_for_editor_tab3.loc[["Grand Total"]]
+                grand_total_row_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] == "Grand Total"].copy()
+                df_for_editor_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] != "Grand Total"].copy()
+            elif "Grand Total" in df_for_editor_tab3.index:
+                grand_total_row_tab3 = df_for_editor_tab3.loc[["Grand Total"]].copy()
                 df_for_editor_tab3 = df_for_editor_tab3.drop(index="Grand Total", errors='ignore')
 
-            # Flatten MultiIndex columns for st.data_editor if they exist
             if isinstance(df_for_editor_tab3.columns, pd.MultiIndex):
-                df_for_editor_tab3.columns = [f"{col[1]} ({col[0]})" for col in df_for_editor_tab3.columns] # e.g. "Metric (Month)"
+                df_for_editor_tab3.columns = [f"{col[1]} ({col[0]})" for col in df_for_editor_tab3.columns]
                 if grand_total_row_tab3 is not None and isinstance(grand_total_row_tab3.columns, pd.MultiIndex):
                      grand_total_row_tab3.columns = [f"{col[1]} ({col[0]})" for col in grand_total_row_tab3.columns]
-
-
-            # Ensure 'Site' column is first if it exists, after potential reset_index
+            
+            # Ensure 'Site' column is first if it exists for editor
             if 'Site' in df_for_editor_tab3.columns:
                 cols_ordered_tab3 = ['Site'] + [col for col in df_for_editor_tab3.columns if col != 'Site']
                 df_for_editor_tab3 = df_for_editor_tab3[cols_ordered_tab3]
-            
+            else: # If 'Site' column wasn't created from index (e.g. df was empty before Grand Total)
+                pass # st.data_editor will handle it, or it might be empty.
+
             st.caption("Edit projected QLs or ICFs per site per month. Note: Totals below are based on initial calculation.")
-            edited_site_level_df_tab3 = st.data_editor(
-                df_for_editor_tab3, 
-                use_container_width=True, 
-                key="site_level_editor_v3_tab3", 
-                num_rows="dynamic" # Or "fixed" if sites are predefined
-            )
+            edited_site_level_df_tab3 = st.data_editor(df_for_editor_tab3, use_container_width=True, key="site_level_editor_v3_tab3", num_rows="dynamic")
+            
             if grand_total_row_tab3 is not None and not grand_total_row_tab3.empty:
                 st.caption("Totals (based on initial calculation, not live edits from above table):")
-                # Ensure 'Site' column is present for consistent display or handle its absence
-                if 'Site' not in grand_total_row_tab3.columns and grand_total_row_tab3.index.name == 'Site':
-                    grand_total_row_tab3 = grand_total_row_tab3.reset_index()
-                elif 'Site' not in grand_total_row_tab3.columns and grand_total_row_tab3.index.name != 'Site':
-                     grand_total_row_tab3.insert(0, 'Site', grand_total_row_tab3.index)
-
-
-                # Reorder 'Site' to be the first column if it exists in grand_total_row_tab3
-                if 'Site' in grand_total_row_tab3.columns:
-                    gt_cols_ordered = ['Site'] + [col for col in grand_total_row_tab3.columns if col != 'Site']
-                    grand_total_row_tab3 = grand_total_row_tab3[gt_cols_ordered]
-
-                st.dataframe(grand_total_row_tab3.style.format("{:,.0f}", na_rep='0'), use_container_width=True)
+                # Prepare grand_total_row for display
+                if 'Site' not in grand_total_row_tab3.columns: # If 'Site' was index
+                    grand_total_row_tab3_display = grand_total_row_tab3.reset_index()
+                    if grand_total_row_tab3_display.columns[0] == 'index': # Default reset_index name
+                        grand_total_row_tab3_display.rename(columns={'index':'Site'}, inplace=True)
+                else:
+                    grand_total_row_tab3_display = grand_total_row_tab3.copy()
+                
+                # Select only numeric columns for formatting, excluding 'Site' if it's text
+                numeric_cols_gt = grand_total_row_tab3_display.select_dtypes(include=np.number).columns
+                formatters_gt = {col: "{:,.0f}" for col in numeric_cols_gt}
+                st.dataframe(grand_total_row_tab3_display.style.format(formatters_gt, na_rep='0'), use_container_width=True)
 
             try: 
                 csv_site_proj_tab3 = edited_site_level_df_tab3.to_csv(index=False).encode('utf-8')
                 st.download_button(label="Download Edited Site Projections (Tab 3)", data=csv_site_proj_tab3, file_name='edited_site_level_projections_tab3.csv', mime='text/csv', key='dl_edited_site_proj_tab3_v2')
             except Exception as e_dl_site3: st.warning(f"Site projection (Tab 3) download error: {e_dl_site3}")
         else: st.info("Site-level projection data (Projections Tab) is not available or is empty.")
-        # --- END CORRECTED SECTION for Tab 3 Site Level Projections ---
 
     with tab_ai:
         st.header("🤖 AI Forecast (Goal-Based)")
@@ -1234,15 +1220,11 @@ if st.session_state.data_processed_successfully:
                     st.subheader("AI Forecasted Site-Level Performance")
                     ai_site_df_displayable = ai_site_df.copy()
                     if ai_site_df_displayable.index.name != 'Site' and 'Site' in ai_site_df_displayable.columns: ai_site_df_displayable.set_index('Site', inplace=True)
-                    elif ai_site_df_displayable.index.name != 'Site' and 'Site' not in ai_site_df_displayable.columns and "Grand Total" in ai_site_df_displayable.index : ai_site_df_displayable.index.name = 'Site' # Assume index is Site
-                    
+                    elif ai_site_df_displayable.index.name != 'Site' and 'Site' not in ai_site_df_displayable.columns and "Grand Total" in ai_site_df_displayable.index : ai_site_df_displayable.index.name = 'Site' 
                     formatted_site_df_ai = ai_site_df_displayable.copy()
-                    # Flatten columns if MultiIndex before formatting
                     if isinstance(formatted_site_df_ai.columns, pd.MultiIndex):
                         formatted_site_df_ai.columns = [f"{col[1]} ({col[0]})" for col in formatted_site_df_ai.columns]
-                    
                     for col_site_ai_name in formatted_site_df_ai.columns:
-                         # Check parts of string for formatting, as columns are now flat
                         if 'Projected QLs (POF)' in col_site_ai_name or 'Projected ICFs Landed' in col_site_ai_name:
                             formatted_site_df_ai[col_site_ai_name] = formatted_site_df_ai[col_site_ai_name].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
                     st.dataframe(formatted_site_df_ai.style.format(na_rep='-'))
