@@ -34,7 +34,7 @@ def parse_funnel_definition(uploaded_file):
             stage_name = str(stage_name).strip().replace('"', ''); parsed_ordered_stages.append(stage_name)
             statuses = column_data.iloc[1:].dropna().astype(str).apply(lambda x: x.strip().replace('"', '')).tolist()
             statuses = [s for s in statuses if s];
-            if stage_name not in statuses: statuses.append(stage_name) # Ensure stage name itself is a status
+            if stage_name not in statuses: statuses.append(stage_name) 
             parsed_funnel_definition[stage_name] = statuses
             clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"; ts_col_map[stage_name] = clean_ts_name
         if not parsed_ordered_stages: st.error("Could not parse stages from Funnel Definition."); return None, None, None
@@ -789,13 +789,20 @@ def calculate_ai_forecast_core(
         ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
         hist_site_pof_prop = processed_df[processed_df[ts_pof_col_for_prop].notna()]['Site'].value_counts(normalize=True) if ts_pof_col_for_prop and ts_pof_col_for_prop in processed_df else pd.Series(dtype=float)
         all_sites_for_ai_tab = site_metrics_df['Site'].unique()
-        site_data_coll_ai = {site: { (m.strftime('%Y-%m'), 'Projected QLs (POF)'): 0, (m.strftime('%Y-%m'), 'Projected ICFs Landed'): 0.0 } for site in all_sites_for_ai_tab for m in projection_calc_months}
+        # --- CORRECTED Initialization for site_data_coll_ai ---
+        site_data_coll_ai = {site_name: {} for site_name in all_sites_for_ai_tab}
+        for site_name_init in all_sites_for_ai_tab:
+            for month_period_init in projection_calc_months: 
+                month_str_init = month_period_init.strftime('%Y-%m')
+                site_data_coll_ai[site_name_init][(month_str_init, 'Projected QLs (POF)')] = 0
+                site_data_coll_ai[site_name_init][(month_str_init, 'Projected ICFs Landed')] = 0.0
+        # --- End Correction ---
         for g_m_site, cohort_r_site in ai_gen_df.iterrows():
             total_qls_cohort = cohort_r_site['Required_QLs_POF']
             if total_qls_cohort <= 0: continue
             for site_n in all_sites_for_ai_tab:
                 site_p = hist_site_pof_prop.get(site_n, 0); site_qls = total_qls_cohort * site_p
-                site_data_coll_ai[site_n][(g_m_site.strftime('%Y-%m'), 'Projected QLs (POF)')] += round(site_qls)
+                site_data_coll_ai[site_n][(g_m_site.strftime('%Y-%m'), 'Projected QLs (POF)')] += round(site_qls) # Error was here
                 site_perf_r = site_metrics_df[site_metrics_df['Site'] == site_n]
                 site_pof_icf_rate = site_perf_r['Qual -> ICF %'].iloc[0] if not site_perf_r.empty and 'Qual -> ICF %' in site_perf_r and pd.notna(site_perf_r['Qual -> ICF %'].iloc[0]) else overall_pof_to_icf_rate
                 site_gen_icfs = site_qls * site_pof_icf_rate
@@ -1104,6 +1111,7 @@ if st.session_state.data_processed_successfully:
             else: st.warning("Projection results table is empty after selecting columns.")
         else: st.warning("Could not calculate projections for Projections Tab.")
         st.markdown("---"); st.subheader("Site-Level Monthly Projections (Projections Tab - Editable)")
+        
         if site_level_proj_tab3 is not None and not site_level_proj_tab3.empty:
             df_for_editor_tab3 = site_level_proj_tab3.copy()
             if df_for_editor_tab3.index.name == 'Site': df_for_editor_tab3.reset_index(inplace=True)
@@ -1115,35 +1123,38 @@ if st.session_state.data_processed_successfully:
                 grand_total_row_tab3 = df_for_editor_tab3.loc[["Grand Total"]].copy()
                 df_for_editor_tab3 = df_for_editor_tab3.drop(index="Grand Total", errors='ignore')
 
+            # Flatten MultiIndex columns before passing to data_editor
             if isinstance(df_for_editor_tab3.columns, pd.MultiIndex):
+                # Create unique, flat column names, e.g., "Metric (Month)"
                 df_for_editor_tab3.columns = [f"{col[1]} ({col[0]})" for col in df_for_editor_tab3.columns]
+                # Also flatten columns for grand_total_row_tab3 if it exists and has MultiIndex
                 if grand_total_row_tab3 is not None and isinstance(grand_total_row_tab3.columns, pd.MultiIndex):
                      grand_total_row_tab3.columns = [f"{col[1]} ({col[0]})" for col in grand_total_row_tab3.columns]
             
-            # Ensure 'Site' column is first if it exists for editor
+            # Ensure 'Site' column is first if it exists
             if 'Site' in df_for_editor_tab3.columns:
                 cols_ordered_tab3 = ['Site'] + [col for col in df_for_editor_tab3.columns if col != 'Site']
                 df_for_editor_tab3 = df_for_editor_tab3[cols_ordered_tab3]
-            else: # If 'Site' column wasn't created from index (e.g. df was empty before Grand Total)
-                pass # st.data_editor will handle it, or it might be empty.
-
+            
             st.caption("Edit projected QLs or ICFs per site per month. Note: Totals below are based on initial calculation.")
             edited_site_level_df_tab3 = st.data_editor(df_for_editor_tab3, use_container_width=True, key="site_level_editor_v3_tab3", num_rows="dynamic")
             
             if grand_total_row_tab3 is not None and not grand_total_row_tab3.empty:
                 st.caption("Totals (based on initial calculation, not live edits from above table):")
-                # Prepare grand_total_row for display
-                if 'Site' not in grand_total_row_tab3.columns: # If 'Site' was index
-                    grand_total_row_tab3_display = grand_total_row_tab3.reset_index()
-                    if grand_total_row_tab3_display.columns[0] == 'index': # Default reset_index name
-                        grand_total_row_tab3_display.rename(columns={'index':'Site'}, inplace=True)
-                else:
-                    grand_total_row_tab3_display = grand_total_row_tab3.copy()
+                grand_total_row_tab3_display = grand_total_row_tab3.copy() # Work with a copy
+                if 'Site' not in grand_total_row_tab3_display.columns: # If 'Site' was index and got reset
+                    if grand_total_row_tab3_display.index.name == 'Site' or "Grand Total" in grand_total_row_tab3_display.index:
+                         grand_total_row_tab3_display = grand_total_row_tab3_display.reset_index()
+                         if grand_total_row_tab3_display.columns[0] == 'index': # Default name after reset
+                             grand_total_row_tab3_display.rename(columns={'index':'Site'}, inplace=True)
                 
-                # Select only numeric columns for formatting, excluding 'Site' if it's text
-                numeric_cols_gt = grand_total_row_tab3_display.select_dtypes(include=np.number).columns
-                formatters_gt = {col: "{:,.0f}" for col in numeric_cols_gt}
-                st.dataframe(grand_total_row_tab3_display.style.format(formatters_gt, na_rep='0'), use_container_width=True)
+                if 'Site' in grand_total_row_tab3_display.columns: # Ensure 'Site' is first for display
+                    gt_cols_ordered_tab3 = ['Site'] + [col for col in grand_total_row_tab3_display.columns if col != 'Site']
+                    grand_total_row_tab3_display = grand_total_row_tab3_display[gt_cols_ordered_tab3]
+
+                numeric_cols_gt_tab3 = grand_total_row_tab3_display.select_dtypes(include=np.number).columns
+                formatters_gt_tab3 = {col: "{:,.0f}" for col in numeric_cols_gt_tab3}
+                st.dataframe(grand_total_row_tab3_display.style.format(formatters_gt_tab3, na_rep='0'), use_container_width=True)
 
             try: 
                 csv_site_proj_tab3 = edited_site_level_df_tab3.to_csv(index=False).encode('utf-8')
