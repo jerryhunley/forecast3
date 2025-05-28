@@ -717,7 +717,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e)
         return default_return_tuple[0], avg_actual_lag_days_for_display if pd.notna(avg_actual_lag_days_for_display) else 30.0, "Error", "Error", pd.DataFrame(), f"Error: {e}"
 
-# --- MODIFIED: AI Forecast Core Function with Site Caps, Diminishing Returns, Backloading Logic ---
+# --- MODIFIED: AI Forecast Core Function with Frontloading Logic ---
 def calculate_ai_forecast_core(
     goal_lpi_date_dt_orig: datetime, goal_icf_number_orig: int, estimated_cpql_user: float,
     icf_variation_percent: float,
@@ -729,7 +729,7 @@ def calculate_ai_forecast_core(
     cpql_inflation_factor_pct: float,
     ql_vol_increase_threshold_pct: float,
     run_mode: str = "primary",
-    backloading_ql_capacity_multiplier: float = 3.0
+    ai_monthly_ql_capacity_multiplier: float = 3.0 # RENAMED from backloading_ql_capacity_multiplier
 ):
     default_return_ai = pd.DataFrame(), pd.DataFrame(), "N/A", "Not Calculated", True, 0
     if not all([processed_df is not None, not processed_df.empty, ordered_stages, ts_col_map,
@@ -741,8 +741,8 @@ def calculate_ai_forecast_core(
         return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Average POF to ICF lag is invalid or not calculated.", True, 0
     if cpql_inflation_factor_pct < 0 or ql_vol_increase_threshold_pct < 0:
          return default_return_ai[0], default_return_ai[1], default_return_ai[2], "CPQL inflation parameters cannot be negative.", True, 0
-    if backloading_ql_capacity_multiplier <=0:
-        backloading_ql_capacity_multiplier = 1.0
+    if ai_monthly_ql_capacity_multiplier <=0: # Ensure multiplier is positive
+        ai_monthly_ql_capacity_multiplier = 1.0
 
     ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
 
@@ -794,7 +794,8 @@ def calculate_ai_forecast_core(
     latest_permissible_generation_month = current_goal_lpi_month_period - avg_lag_months_approx
     earliest_permissible_generation_month = proj_start_month_period
 
-    valid_generation_months_for_backloading = pd.period_range(
+    # CHANGED: Iteration direction - now this is the window for FRONTLOADING
+    valid_generation_months_for_planning = pd.period_range(
         start=max(earliest_permissible_generation_month, projection_calc_months.min()),
         end=min(latest_permissible_generation_month, projection_calc_months.max())
     )
@@ -813,12 +814,13 @@ def calculate_ai_forecast_core(
                     calculated_baseline = total_pof_baseline_period / months_for_baseline_calc
                     if calculated_baseline > 0: baseline_monthly_ql_volume = calculated_baseline
 
-    monthly_ql_capacity_target_heuristic = baseline_monthly_ql_volume * backloading_ql_capacity_multiplier
+    monthly_ql_capacity_target_heuristic = baseline_monthly_ql_volume * ai_monthly_ql_capacity_multiplier # Using renamed parameter
     if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
-    # --- DEBUGGING STATEMENTS (Primary Run - Before Backloading) ---
+
+    # --- DEBUGGING STATEMENTS (Primary Run - Before Planning Loop) ---
     if run_mode == "primary":
-        st.sidebar.subheader("Debug Info (Primary Run - Before Backloading)")
+        st.sidebar.subheader("Debug Info (Primary Run - Before Planning Loop)")
         st.sidebar.markdown(f"**Goal LPI (orig):** `{goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}`")
         st.sidebar.markdown(f"**Goal ICFs:** `{current_goal_icf_number}`")
         st.sidebar.markdown(f"**Avg POF-ICF Lag (days):** `{avg_overall_lag_days:.2f}`")
@@ -833,16 +835,16 @@ def calculate_ai_forecast_core(
         st.sidebar.markdown(f"**Latest Permissible Generation Month for this LPI:** `{latest_permissible_generation_month}`")
         st.sidebar.markdown(f"**Earliest Permissible Generation Month:** `{earliest_permissible_generation_month}`")
         
-        gen_months_min_str = valid_generation_months_for_backloading.min().strftime('%Y-%m') if not valid_generation_months_for_backloading.empty else 'N/A'
-        gen_months_max_str = valid_generation_months_for_backloading.max().strftime('%Y-%m') if not valid_generation_months_for_backloading.empty else 'N/A'
-        st.sidebar.markdown(f"**Valid Generation Months for Backloading:** `{len(valid_generation_months_for_backloading)} months ({gen_months_min_str} to {gen_months_max_str})`")
+        gen_months_min_str = valid_generation_months_for_planning.min().strftime('%Y-%m') if not valid_generation_months_for_planning.empty else 'N/A'
+        gen_months_max_str = valid_generation_months_for_planning.max().strftime('%Y-%m') if not valid_generation_months_for_planning.empty else 'N/A'
+        st.sidebar.markdown(f"**Valid Generation Months for Planning:** `{len(valid_generation_months_for_planning)} months ({gen_months_min_str} to {gen_months_max_str})`")
         
         st.sidebar.markdown(f"**Baseline Monthly QL Volume:** `{baseline_monthly_ql_volume:.2f}`")
-        st.sidebar.markdown(f"**Backloading QL Capacity Multiplier:** `{backloading_ql_capacity_multiplier}`")
+        st.sidebar.markdown(f"**AI Monthly QL Capacity Multiplier:** `{ai_monthly_ql_capacity_multiplier}`") # Renamed parameter
         st.sidebar.markdown(f"**Monthly QL Capacity Target Heuristic (per month):** `{monthly_ql_capacity_target_heuristic:.2f}`")
         
-        if not valid_generation_months_for_backloading.empty:
-            max_possible_qls_with_heuristic_in_timeline = monthly_ql_capacity_target_heuristic * len(valid_generation_months_for_backloading)
+        if not valid_generation_months_for_planning.empty:
+            max_possible_qls_with_heuristic_in_timeline = monthly_ql_capacity_target_heuristic * len(valid_generation_months_for_planning)
             st.sidebar.markdown(f"**Max QLs plannable in timeline with heuristic:** `{max_possible_qls_with_heuristic_in_timeline:.0f}`")
         else:
             st.sidebar.markdown("**No valid generation months for primary LPI target.**")
@@ -860,12 +862,12 @@ def calculate_ai_forecast_core(
             score = site_row.get('Qual -> ICF %', 0.0) ; score = 0.0 if pd.isna(score) or score < 0 else score
             site_redistribution_scores[site_row['Site']] = score if score > 1e-6 else 1e-6
 
-    if not valid_generation_months_for_backloading.empty:
-        for gen_month in reversed(valid_generation_months_for_backloading):
+    if not valid_generation_months_for_planning.empty: # CHANGED: Variable name
+        for gen_month in valid_generation_months_for_planning: # CHANGED: Iterate FORWARDS (no reversed())
             if icfs_still_to_assign_globally <= 1e-9: break
 
-            qls_theoretically_needed = (icfs_still_to_assign_globally / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
-            current_month_initial_ql_target = min(qls_theoretically_needed, monthly_ql_capacity_target_heuristic)
+            qls_theoretically_needed_for_remaining = (icfs_still_to_assign_globally / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
+            current_month_initial_ql_target = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
             current_month_initial_ql_target = round(max(0, current_month_initial_ql_target))
 
             ai_gen_df.loc[gen_month, 'Required_QLs_POF_Initial'] = current_month_initial_ql_target
@@ -930,7 +932,7 @@ def calculate_ai_forecast_core(
             icfs_still_to_assign_globally -= icfs_generated_this_month
     else: 
         if run_mode == "primary": 
-            st.sidebar.error("Primary run: No valid generation months for backloading (LPI likely too soon or projection too short).")
+            st.sidebar.error("Primary run: No valid generation months for planning (LPI likely too soon or projection too short).")
         if icfs_still_to_assign_globally > 1e-9: 
             first_possible_landing_month_check = proj_start_month_period + avg_lag_months_approx
             feasibility_details = f"Goal LPI ({current_goal_lpi_month_period.strftime('%Y-%m')}) combined with lag ({avg_overall_lag_days:.1f} days) results in no valid generation months within the projection window. Minimum landing month: {first_possible_landing_month_check.strftime('%Y-%m')}."
@@ -1105,9 +1107,9 @@ def calculate_ai_forecast_core(
             ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy()
         except Exception: pass
     
-    # Store ai_gen_df for debugging if in primary run
-    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'session_state'): # Check if streamlit context exists
+    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'session_state'): 
         st.session_state.ai_gen_df_debug_primary = ai_gen_df.copy()
+        st.session_state.ai_results_df_debug_primary = ai_results_df.copy()
 
 
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final_display, is_unfeasible_this_run, final_achieved_icfs_landed_run
@@ -1115,6 +1117,7 @@ def calculate_ai_forecast_core(
 
 # --- Streamlit UI ---
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
+# ... (rest of session state initializations) ...
 if 'referral_data_processed' not in st.session_state: st.session_state.referral_data_processed = None
 if 'funnel_definition' not in st.session_state: st.session_state.funnel_definition = None
 if 'ordered_stages' not in st.session_state: st.session_state.ordered_stages = None
@@ -1133,7 +1136,7 @@ use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3; goal_icf_co
 proj_icf_variation_percent_sidebar = 10
 ai_cpql_inflation_factor_sidebar = 0.0 
 ai_ql_volume_threshold_sidebar = 10.0 
-ai_backloading_heuristic_multiplier_sidebar_val = 3.0 # Default for the new slider
+ai_monthly_ql_capacity_multiplier_sidebar_val = 3.0 # Default for the new slider, RENAMED
 
 with st.sidebar:
     st.header("⚙️ Setup")
@@ -1248,11 +1251,11 @@ with st.sidebar:
             "QL Volume Increase Threshold (%) for Inflation", 1.0, 50.0, 10.0, 1.0, key="ai_ql_vol_thresh_v2",
             help="Inflation applies for every X% increase in monthly QLs over historical baseline."
         )
-        ai_backloading_heuristic_multiplier_sidebar_val = st.slider(
-            "AI: Backloading QL Capacity Multiplier",
+        ai_monthly_ql_capacity_multiplier_sidebar_val = st.slider( # RENAMED and updated help text
+            "AI: Monthly QL Capacity Multiplier",
             min_value=1.0, max_value=30.0, value=3.0, step=0.5,
-            key="ai_backload_mult_v1",
-            help="Multiplier for baseline QLs a single month will attempt to handle during the AI forecast's backloading planning phase. Higher values allow more aggressive use of later months for the primary LPI target."
+            key="ai_monthly_ql_cap_mult_v1", # New key
+            help="Multiplier for baseline QLs a single month will attempt to handle during AI forecast planning. Higher values allow more QLs per month if needed by the timeline."
         )
 
 
@@ -1452,12 +1455,12 @@ if st.session_state.data_processed_successfully:
     with tab_ai:
         st.header("🤖 AI Forecast (Goal-Based)")
         st.info("""
-        Define your recruitment goals. The tool will estimate a monthly plan using a 'backloading' strategy
-        (prioritizing later months for activity if feasible) to meet your LPI.
+        Define your recruitment goals. The tool will estimate a monthly plan using a 'frontloading' strategy
+        (prioritizing earlier months for activity, up to a monthly capacity) to meet your LPI.
         - **Conversion Rates:** Choose how historical conversion rates are applied.
         - **CPQL:** Your estimated Cost Per Qualified Lead (e.g., for "Passed Online Form").
         - **Site Caps:** Optionally, set monthly QL (POF) limits per site.
-        - **CPQL Inflation & Backloading Multiplier:** Optionally, model increasing CPQL with higher volume and control monthly QL planning aggressiveness (set in sidebar).
+        - **CPQL Inflation & Monthly QL Multiplier:** Optionally, model increasing CPQL with higher volume and control monthly QL planning aggressiveness (set in sidebar).
         - **ICF Variation:** Applies a +/- percentage to generated ICFs for CPICF sensitivity (set in sidebar).
         """)
 
@@ -1558,7 +1561,7 @@ if st.session_state.data_processed_successfully:
                     site_caps_input=default_site_caps_ai_input_val, site_scoring_weights_for_ai=weights_normalized,
                     cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                     run_mode=run_mode_for_call_primary,
-                    backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val 
+                    ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val # Using slider value
                 )
                 st.session_state.ai_forecast_results = {
                     'df': ai_results_df_run1, 'site_df': ai_site_df_run1, 'ads_off': ai_ads_off_run1,
@@ -1580,7 +1583,7 @@ if st.session_state.data_processed_successfully:
                         site_caps_input=default_site_caps_ai_input_val, site_scoring_weights_for_ai=weights_normalized,
                         cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                         run_mode=run_mode_for_call_best_case,
-                        backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val 
+                        ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val # Using slider value
                     )
                     st.session_state.ai_forecast_results = {
                         'df': ai_results_df_run2, 'site_df': ai_site_df_run2, 'ads_off': ai_ads_off_run2,
@@ -1603,20 +1606,25 @@ if st.session_state.data_processed_successfully:
             elif ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
             else: st.success(f"Forecast Status: {ai_message}")
 
-            # --- DEBUGGING STATEMENTS (Primary Run - After Calc) ---
             if results.get('run_mode_displayed') == "primary" and 'st' in globals() and hasattr(st, 'session_state'):
                 if 'ai_gen_df_debug_primary' in st.session_state and st.session_state.ai_gen_df_debug_primary is not None:
                     st.sidebar.subheader("Debug Info (Primary Run - After Calc)")
                     st.sidebar.markdown(f"**Message:** `{results['message']}`")
                     st.sidebar.markdown(f"**Unfeasible:** `{results['unfeasible']}`")
                     st.sidebar.markdown(f"**Actual ICFs Achieved (Primary):** `{results['actual_icfs']:.1f}`")
-                    st.sidebar.write("Primary Run ai_gen_df (QLs Final & ICF Gen):")
-                    display_debug_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
-                    display_debug_df.index = display_debug_df.index.strftime('%Y-%m')
-                    st.sidebar.dataframe(display_debug_df)
-                    del st.session_state.ai_gen_df_debug_primary # Clean up after display
-            # --- END DEBUGGING ---
+                    st.sidebar.write("Primary Run ai_gen_df (Gen Plan):")
+                    display_debug_gen_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
+                    display_debug_gen_df.index = display_debug_gen_df.index.strftime('%Y-%m')
+                    st.sidebar.dataframe(display_debug_gen_df)
+                    if 'ai_gen_df_debug_primary' in st.session_state: del st.session_state.ai_gen_df_debug_primary 
 
+                if 'ai_results_df_debug_primary' in st.session_state and st.session_state.ai_results_df_debug_primary is not None: 
+                    st.sidebar.write("Primary Run ai_results_df (Landing Plan):")
+                    display_debug_results_df = st.session_state.ai_results_df_debug_primary[['Projected_ICF_Landed', 'Cumulative_ICF_Landed']].copy()
+                    display_debug_results_df.index = display_debug_results_df.index.strftime('%Y-%m')
+                    st.sidebar.dataframe(display_debug_results_df)
+                    if 'ai_results_df_debug_primary' in st.session_state: del st.session_state.ai_results_df_debug_primary
+            
             ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
             ai_col1_res.metric("Target LPI Date (Original Goal)", ai_goal_lpi_date.strftime("%Y-%m-%d")) 
             goal_display_val = f"{ai_goal_icf_num:,}"
