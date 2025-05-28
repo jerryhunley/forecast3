@@ -18,9 +18,14 @@ STAGE_PRE_SCREENING_ACTIVITIES = "Pre-Screening Activities"
 STAGE_SENT_TO_SITE = "Sent To Site"
 STAGE_APPOINTMENT_SCHEDULED = "Appointment Scheduled"
 STAGE_SIGNED_ICF = "Signed ICF"
-STAGE_SCREEN_FAILED = "Screen Failed" # Example, if used in metrics
+STAGE_SCREEN_FAILED = "Screen Failed" 
 
 # --- Helper Functions ---
+# ... (All helper functions: parse_funnel_definition, parse_datetime_with_timezone, parse_history_string, 
+#      get_stage_timestamps, preprocess_referral_data, calculate_proforma_metrics, 
+#      calculate_avg_lag_generic, calculate_overall_inter_stage_lags, calculate_site_metrics, 
+#      score_sites, determine_effective_projection_rates, calculate_projections, calculate_ai_forecast_core
+#      - UNCHANGED from the previous version where they were last corrected and working) ...
 @st.cache_data
 def parse_funnel_definition(uploaded_file):
     if uploaded_file is None: return None, None, None
@@ -797,20 +802,37 @@ def calculate_ai_forecast_core(
                 site_data_coll_ai[site_name_init][(month_str_init, 'Projected QLs (POF)')] = 0
                 site_data_coll_ai[site_name_init][(month_str_init, 'Projected ICFs Landed')] = 0.0
         # --- End Correction ---
-        for g_m_site, cohort_r_site in ai_gen_df.iterrows():
+        for g_m_site, cohort_r_site in ai_gen_df.iterrows(): # ai_gen_df.index is projection_calc_months
             total_qls_cohort = cohort_r_site['Required_QLs_POF']
             if total_qls_cohort <= 0: continue
             for site_n in all_sites_for_ai_tab:
                 site_p = hist_site_pof_prop.get(site_n, 0); site_qls = total_qls_cohort * site_p
-                site_data_coll_ai[site_n][(g_m_site.strftime('%Y-%m'), 'Projected QLs (POF)')] += round(site_qls) # Error was here
+                # Ensure the key exists before incrementing
+                key_ql = (g_m_site.strftime('%Y-%m'), 'Projected QLs (POF)')
+                if key_ql in site_data_coll_ai[site_n]:
+                     site_data_coll_ai[site_n][key_ql] += round(site_qls)
+                else: # Should not happen with corrected init, but as a safeguard:
+                     site_data_coll_ai[site_n][key_ql] = round(site_qls)
+
                 site_perf_r = site_metrics_df[site_metrics_df['Site'] == site_n]
                 site_pof_icf_rate = site_perf_r['Qual -> ICF %'].iloc[0] if not site_perf_r.empty and 'Qual -> ICF %' in site_perf_r and pd.notna(site_perf_r['Qual -> ICF %'].iloc[0]) else overall_pof_to_icf_rate
                 site_gen_icfs = site_qls * site_pof_icf_rate
                 s_full_lag_m = int(np.floor(avg_overall_lag_days / days_in_avg_m)); s_rem_lag_d = avg_overall_lag_days - (s_full_lag_m * days_in_avg_m)
                 s_frac_next = s_rem_lag_d / days_in_avg_m; s_frac_curr = 1.0 - s_frac_next
                 s_land_m1 = g_m_site + s_full_lag_m; s_land_m2 = s_land_m1 + 1
-                if s_land_m1 in projection_calc_months: site_data_coll_ai[site_n][(s_land_m1.strftime('%Y-%m'), 'Projected ICFs Landed')] += site_gen_icfs * s_frac_curr
-                if s_land_m2 in projection_calc_months: site_data_coll_ai[site_n][(s_land_m2.strftime('%Y-%m'), 'Projected ICFs Landed')] += site_gen_icfs * s_frac_next
+                
+                key_icf_landed_m1 = (s_land_m1.strftime('%Y-%m'), 'Projected ICFs Landed')
+                key_icf_landed_m2 = (s_land_m2.strftime('%Y-%m'), 'Projected ICFs Landed')
+
+                if s_land_m1 in projection_calc_months: 
+                    if key_icf_landed_m1 in site_data_coll_ai[site_n]:
+                        site_data_coll_ai[site_n][key_icf_landed_m1] += site_gen_icfs * s_frac_curr
+                    # else: site_data_coll_ai[site_n][key_icf_landed_m1] = site_gen_icfs * s_frac_curr # Safeguard
+                if s_land_m2 in projection_calc_months: 
+                    if key_icf_landed_m2 in site_data_coll_ai[site_n]:
+                        site_data_coll_ai[site_n][key_icf_landed_m2] += site_gen_icfs * s_frac_next
+                    # else: site_data_coll_ai[site_n][key_icf_landed_m2] = site_gen_icfs * s_frac_next # Safeguard
+
         if site_data_coll_ai:
             ai_site_proj_df = pd.DataFrame.from_dict(site_data_coll_ai, orient='index')
             if not ai_site_proj_df.empty: 
@@ -860,6 +882,13 @@ weights_normalized = {}; proj_horizon_sidebar = 12
 proj_spend_dict_sidebar = {}; proj_cpqr_dict_sidebar = {}; manual_proj_conv_rates_sidebar = {}
 use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3; goal_icf_count_sidebar = 100
 proj_icf_variation_percent_sidebar = 10
+
+# --- MODIFIED: Added variables for AI Forecast Tab rate selection ---
+ai_rate_assumption_method_tab = "6-Month Rolling Historical Average" # Default
+ai_rolling_window_months_tab = 6
+ai_manual_conv_rates_tab = {}
+
+
 with st.sidebar:
     st.header("⚙️ Setup")
     uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
@@ -896,7 +925,7 @@ with st.sidebar:
         else: weights_normalized = {k: 0 for k in weights_input_local} 
         st.caption(f"Weights normalized. Lower is better for TTC, Screen Fail %, Lags.")
     st.divider()
-    with st.expander("Projection Assumptions", expanded=True): 
+    with st.expander("Projection Assumptions (Main Projections Tab)", expanded=True): 
         proj_horizon_sidebar = st.number_input("Projection Horizon (Months)", min_value=1, max_value=48, value=proj_horizon_sidebar, step=1, key='proj_horizon_widget_v2', help="Max months for the 'Projections' tab.")
         goal_icf_count_sidebar = st.number_input("Goal Total ICFs (for Projections Tab)", min_value=1, value=goal_icf_count_sidebar, step=1, key='goal_icf_input_v2', help="Target ICFs for standard projections.")
         _proj_start_month_ui_editor = pd.Period(datetime.now(), freq='M') + 1
@@ -1111,7 +1140,6 @@ if st.session_state.data_processed_successfully:
             else: st.warning("Projection results table is empty after selecting columns.")
         else: st.warning("Could not calculate projections for Projections Tab.")
         st.markdown("---"); st.subheader("Site-Level Monthly Projections (Projections Tab - Editable)")
-        
         if site_level_proj_tab3 is not None and not site_level_proj_tab3.empty:
             df_for_editor_tab3 = site_level_proj_tab3.copy()
             if df_for_editor_tab3.index.name == 'Site': df_for_editor_tab3.reset_index(inplace=True)
@@ -1122,40 +1150,29 @@ if st.session_state.data_processed_successfully:
             elif "Grand Total" in df_for_editor_tab3.index:
                 grand_total_row_tab3 = df_for_editor_tab3.loc[["Grand Total"]].copy()
                 df_for_editor_tab3 = df_for_editor_tab3.drop(index="Grand Total", errors='ignore')
-
-            # Flatten MultiIndex columns before passing to data_editor
             if isinstance(df_for_editor_tab3.columns, pd.MultiIndex):
-                # Create unique, flat column names, e.g., "Metric (Month)"
                 df_for_editor_tab3.columns = [f"{col[1]} ({col[0]})" for col in df_for_editor_tab3.columns]
-                # Also flatten columns for grand_total_row_tab3 if it exists and has MultiIndex
                 if grand_total_row_tab3 is not None and isinstance(grand_total_row_tab3.columns, pd.MultiIndex):
                      grand_total_row_tab3.columns = [f"{col[1]} ({col[0]})" for col in grand_total_row_tab3.columns]
-            
-            # Ensure 'Site' column is first if it exists
             if 'Site' in df_for_editor_tab3.columns:
                 cols_ordered_tab3 = ['Site'] + [col for col in df_for_editor_tab3.columns if col != 'Site']
                 df_for_editor_tab3 = df_for_editor_tab3[cols_ordered_tab3]
-            
             st.caption("Edit projected QLs or ICFs per site per month. Note: Totals below are based on initial calculation.")
             edited_site_level_df_tab3 = st.data_editor(df_for_editor_tab3, use_container_width=True, key="site_level_editor_v3_tab3", num_rows="dynamic")
-            
             if grand_total_row_tab3 is not None and not grand_total_row_tab3.empty:
                 st.caption("Totals (based on initial calculation, not live edits from above table):")
-                grand_total_row_tab3_display = grand_total_row_tab3.copy() # Work with a copy
-                if 'Site' not in grand_total_row_tab3_display.columns: # If 'Site' was index and got reset
+                grand_total_row_tab3_display = grand_total_row_tab3.copy() 
+                if 'Site' not in grand_total_row_tab3_display.columns: 
                     if grand_total_row_tab3_display.index.name == 'Site' or "Grand Total" in grand_total_row_tab3_display.index:
                          grand_total_row_tab3_display = grand_total_row_tab3_display.reset_index()
-                         if grand_total_row_tab3_display.columns[0] == 'index': # Default name after reset
+                         if grand_total_row_tab3_display.columns[0] == 'index': 
                              grand_total_row_tab3_display.rename(columns={'index':'Site'}, inplace=True)
-                
-                if 'Site' in grand_total_row_tab3_display.columns: # Ensure 'Site' is first for display
+                if 'Site' in grand_total_row_tab3_display.columns: 
                     gt_cols_ordered_tab3 = ['Site'] + [col for col in grand_total_row_tab3_display.columns if col != 'Site']
                     grand_total_row_tab3_display = grand_total_row_tab3_display[gt_cols_ordered_tab3]
-
                 numeric_cols_gt_tab3 = grand_total_row_tab3_display.select_dtypes(include=np.number).columns
                 formatters_gt_tab3 = {col: "{:,.0f}" for col in numeric_cols_gt_tab3}
                 st.dataframe(grand_total_row_tab3_display.style.format(formatters_gt_tab3, na_rep='0'), use_container_width=True)
-
             try: 
                 csv_site_proj_tab3 = edited_site_level_df_tab3.to_csv(index=False).encode('utf-8')
                 st.download_button(label="Download Edited Site Projections (Tab 3)", data=csv_site_proj_tab3, file_name='edited_site_level_projections_tab3.csv', mime='text/csv', key='dl_edited_site_proj_tab3_v2')
@@ -1164,81 +1181,170 @@ if st.session_state.data_processed_successfully:
 
     with tab_ai:
         st.header("🤖 AI Forecast (Goal-Based)")
-        st.info("Define your recruitment goals, and the tool will estimate a plan. Assumes Cost Per Qualified Lead (POF) is consistent unless advanced options are used (future feature).")
-        ai_cols = st.columns(3)
-        with ai_cols[0]:
+        st.info("""
+        Define your recruitment goals. The tool will estimate a monthly plan.
+        - **Conversion Rates:** Choose how historical conversion rates are applied.
+        - **CPQL:** Your estimated Cost Per Qualified Lead (e.g., for "Passed Online Form").
+        - **ICF Variation:** Applies a +/- percentage to generated ICFs for CPICF sensitivity.
+        """)
+
+        ai_col1, ai_col2, ai_col3 = st.columns(3)
+        with ai_col1:
             ai_goal_lpi_date = st.date_input("Target LPI Date", value=datetime.now() + pd.DateOffset(months=12), min_value=datetime.now() + pd.DateOffset(months=1), key="ai_lpi_date")
-        with ai_cols[1]:
+        with ai_col2:
             ai_goal_icf_num = st.number_input("Target Total ICFs", min_value=1, value=100, step=10, key="ai_icf_num")
-        with ai_cols[2]:
-            ai_cpql_estimate = st.number_input("Estimated Cost Per Qualified Lead (POF)", min_value=1.0, value=75.0, step=5.0, format="%.2f", key="ai_cpql", help="Your average cost to get one lead to the 'Passed Online Form' (or equivalent first funnel) stage.")
-        ai_effective_rates, ai_rates_method_desc = determine_effective_projection_rates(referral_data_processed, ordered_stages, ts_col_map, 'Rolling Historical Average', 6, manual_proj_conv_rates_sidebar, inter_stage_lags_data, sidebar_display_area=None)
-        if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc or not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()):
-            st.warning(f"Could not determine reliable historical rates for AI Forecast ({ai_rates_method_desc}). Using manual rates from sidebar as fallback.")
-            ai_effective_rates = manual_proj_conv_rates_sidebar; ai_rates_method_desc = "Manual (Fallback)"
-        pof_ts_col_ai = ts_col_map.get(STAGE_PASSED_ONLINE_FORM); icf_ts_col_ai = ts_col_map.get(STAGE_SIGNED_ICF)
+        with ai_col3:
+            ai_cpql_estimate = st.number_input("Estimated Cost Per Qualified Lead (POF)", min_value=1.0, value=75.0, step=5.0, format="%.2f", key="ai_cpql", help="Cost for 'Passed Online Form' or equivalent.")
+
+        st.markdown("---")
+        st.subheader("AI Forecast Assumptions")
+        
+        # --- MODIFIED: Rate selection for AI Forecast Tab ---
+        rate_options_ai = {
+            "Manual Input Below": "Manual Input Below",
+            "Overall Historical Average": "Overall Historical", # Placeholder, logic in determine_effective_projection_rates needs to handle this
+            "1-Month Rolling Average": "1-Month Rolling",
+            "3-Month Rolling Average": "3-Month Rolling",
+            "6-Month Rolling Average": "6-Month Rolling"
+        }
+        # Use a more descriptive label for the radio button
+        selected_rate_method_label_ai = st.radio(
+            "Base AI Forecast Conversion Rates On:",
+            options=list(rate_options_ai.keys()),
+            index=4,  # Default to 6-Month Rolling
+            key="ai_rate_method_radio",
+            horizontal=True
+        )
+        
+        # Determine internal method string and rolling window based on selection
+        ai_rate_assumption_method_tab_internal = "Manual Input Below" # Default
+        ai_rolling_window_months_tab_internal = 0 # Default for non-rolling
+
+        if selected_rate_method_label_ai == "Overall Historical Average":
+             # This option might need special handling in determine_effective_projection_rates
+             # For now, let's treat it as a very long rolling window or a separate calculation.
+             # Simplification: For now, let's make it behave like a long rolling window.
+             ai_rate_assumption_method_tab_internal = "Rolling Historical Average"
+             ai_rolling_window_months_tab_internal = 99 # Indicate a very long/overall window
+        elif "Rolling" in selected_rate_method_label_ai:
+            ai_rate_assumption_method_tab_internal = "Rolling Historical Average"
+            try:
+                ai_rolling_window_months_tab_internal = int(selected_rate_method_label_ai.split('-')[0])
+            except:
+                ai_rolling_window_months_tab_internal = 6 # Fallback
+        
+        # Manual rate inputs for AI tab (only if "Manual Input Below" is selected)
+        ai_manual_conv_rates_tab_input = {}
+        if selected_rate_method_label_ai == "Manual Input Below":
+            st.write("Define Manual Conversion Rates for AI Forecast:")
+            ai_cols_rate = st.columns(2)
+            with ai_cols_rate[0]:
+                 ai_manual_conv_rates_tab_input[f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}"] = st.slider("AI: POF -> PreScreen %", 0.0, 100.0, 90.0, step=0.1, format="%.1f%%", key='ai_cr_qps') / 100.0
+                 ai_manual_conv_rates_tab_input[f"{STAGE_PRE_SCREENING_ACTIVITIES} -> {STAGE_SENT_TO_SITE}"] = st.slider("AI: PreScreen -> StS %", 0.0, 100.0, 25.0, step=0.1, format="%.1f%%", key='ai_cr_pssts') / 100.0
+            with ai_cols_rate[1]:
+                 ai_manual_conv_rates_tab_input[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("AI: StS -> Appt %", 0.0, 100.0, 50.0, step=0.1, format="%.1f%%", key='ai_cr_sa') / 100.0
+                 ai_manual_conv_rates_tab_input[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("AI: Appt -> ICF %", 0.0, 100.0, 60.0, step=0.1, format="%.1f%%", key='ai_cr_ai') / 100.0
+        # --- End MODIFIED ---
+
+        # Determine rates to use for AI forecast
+        if selected_rate_method_label_ai == "Manual Input Below":
+            ai_effective_rates = ai_manual_conv_rates_tab_input
+            ai_rates_method_desc = "Manual Input for AI Forecast"
+        else: # For 'Overall Historical' or specific rolling windows
+            # The manual_proj_conv_rates_sidebar is passed as a fallback if rolling calcs fail
+            ai_effective_rates, ai_rates_method_desc = determine_effective_projection_rates(
+                referral_data_processed, ordered_stages, ts_col_map, 
+                ai_rate_assumption_method_tab_internal, # 'Rolling Historical Average' or 'Manual'
+                ai_rolling_window_months_tab_internal,    # Actual window number (e.g., 1, 3, 6, or 99 for overall)
+                manual_proj_conv_rates_sidebar,           # Fallback if all else fails
+                inter_stage_lags_data, 
+                sidebar_display_area=None 
+            )
+            if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc or not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()):
+                st.warning(f"Could not determine reliable '{selected_rate_method_label_ai}' rates for AI Forecast ({ai_rates_method_desc}). Using manual rates from sidebar as fallback.")
+                ai_effective_rates = manual_proj_conv_rates_sidebar # Fallback to main tab's manual rates
+                ai_rates_method_desc = f"Manual (Fallback from Projections Tab Sidebar due to issue with '{selected_rate_method_label_ai}')"
+        
+        # Lag Calculation
+        pof_ts_col_ai = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
+        icf_ts_col_ai = ts_col_map.get(STAGE_SIGNED_ICF)
         avg_pof_icf_lag_ai = np.nan
         if pof_ts_col_ai and icf_ts_col_ai and pof_ts_col_ai in referral_data_processed.columns and icf_ts_col_ai in referral_data_processed.columns:
             avg_pof_icf_lag_ai = calculate_avg_lag_generic(referral_data_processed, pof_ts_col_ai, icf_ts_col_ai)
-        if pd.isna(avg_pof_icf_lag_ai): 
-            avg_pof_icf_lag_ai = avg_lag_used_tab3 if 'avg_lag_used_tab3' in locals() and pd.notna(avg_lag_used_tab3) else 30.0
-            st.caption(f"AI Forecast using fallback POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days. Rates: {ai_rates_method_desc}")
-        else: st.caption(f"AI Forecast using calculated POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days. Rates based on: {ai_rates_method_desc}")
+        
+        # Fallback for lag if still NaN
+        avg_lag_to_use_for_ai = avg_pof_icf_lag_ai
+        lag_source_message_ai = f"Calculated Historical POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days"
+        if pd.isna(avg_pof_icf_lag_ai):
+            # Try to get from main projection tab's calculation if available
+            # This part assumes 'avg_lag_used_tab3' might exist from a previous run of tab3, which is not ideal.
+            # It's better if AI tab is self-sufficient or gets its lag directly.
+            # For simplicity in this step, we'll use a fixed default if direct calc fails.
+            avg_lag_to_use_for_ai = 30.0 
+            lag_source_message_ai = f"Using default POF-ICF lag: {avg_lag_to_use_for_ai:.1f} days (direct calculation failed)"
+        
+        st.caption(f"AI Forecast using: {lag_source_message_ai}. Conversion rates based on: {ai_rates_method_desc}")
+
         if st.button("🚀 Generate AI Forecast", key="run_ai_forecast"):
-            if pd.isna(avg_pof_icf_lag_ai): st.error("Cannot run AI Forecast: Average POF to ICF lag is not available.")
+            if pd.isna(avg_lag_to_use_for_ai):
+                st.error("Cannot run AI Forecast: Average POF to ICF lag is not available or could not be determined.")
+            elif not ai_effective_rates or all(r == 0 for r in ai_effective_rates.values()):
+                 st.error("Cannot run AI Forecast: Effective conversion rates are zero or unavailable. Check rate settings.")
             else:
                 ai_results_df, ai_site_df, ai_ads_off, ai_message, ai_unfeasible = calculate_ai_forecast_core(
                     goal_lpi_date_dt=ai_goal_lpi_date, goal_icf_number=ai_goal_icf_num, estimated_cpql=ai_cpql_estimate, 
                     icf_variation_percent=proj_icf_variation_percent_sidebar, processed_df=referral_data_processed, 
                     ordered_stages=ordered_stages, ts_col_map=ts_col_map, effective_projection_conv_rates=ai_effective_rates, 
-                    avg_overall_lag_days=avg_pof_icf_lag_ai, site_metrics_df=site_metrics_calculated_data, 
-                    projection_horizon_months = proj_horizon_sidebar)
+                    avg_overall_lag_days=avg_lag_to_use_for_ai, site_metrics_df=site_metrics_calculated_data, 
+                    projection_horizon_months = proj_horizon_sidebar # Max horizon from sidebar
+                )
                 st.markdown("---")
                 if ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
                 else: st.success(f"Forecast Status: {ai_message}")
-                ai_col1, ai_col2, ai_col3 = st.columns(3)
-                ai_col1.metric("Target LPI Date", ai_goal_lpi_date.strftime("%Y-%m-%d"))
-                ai_col2.metric("Target ICFs", f"{ai_goal_icf_num:,}")
-                ai_col3.metric("Est. Ads Off Date", ai_ads_off if ai_ads_off != "N/A" else "Past LPI/Goal Unmet")
+                ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
+                ai_col1_res.metric("Target LPI Date", ai_goal_lpi_date.strftime("%Y-%m-%d"))
+                ai_col2_res.metric("Target ICFs", f"{ai_goal_icf_num:,}")
+                ai_col3_res.metric("Est. Ads Off Date", ai_ads_off if ai_ads_off != "N/A" else "Past LPI/Goal Unmet")
+
                 if not ai_results_df.empty:
                     st.subheader("AI Forecasted Monthly Performance")
-                    ai_display_df = ai_results_df.copy(); ai_display_df.index = ai_display_df.index.strftime('%Y-%m')
-                    if all(c in ai_display_df.columns for c in ['Projected_CPICF_Cohort_Source_Low', 'Projected_CPICF_Cohort_Source_Mean', 'Projected_CPICF_Cohort_Source_High']):
-                        ai_display_df['Projected CPICF (Low-Mean-High)'] = ai_display_df.apply(
+                    ai_display_df_res = ai_results_df.copy(); ai_display_df_res.index = ai_display_df_res.index.strftime('%Y-%m')
+                    if all(c in ai_display_df_res.columns for c in ['Projected_CPICF_Cohort_Source_Low', 'Projected_CPICF_Cohort_Source_Mean', 'Projected_CPICF_Cohort_Source_High']):
+                        ai_display_df_res['Projected CPICF (Low-Mean-High)'] = ai_display_df_res.apply(
                             lambda row: (f"${row['Projected_CPICF_Cohort_Source_Low']:,.2f} - ${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} - ${row['Projected_CPICF_Cohort_Source_High']:,.2f}"
                                  if pd.notna(row['Projected_CPICF_Cohort_Source_Low']) and pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) and pd.notna(row['Projected_CPICF_Cohort_Source_High'])
                                  else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"))
                                 if proj_icf_variation_percent_sidebar > 0 else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
-                        cols_to_show_ai = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected CPICF (Low-Mean-High)']
+                        cols_to_show_ai_res = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected CPICF (Low-Mean-High)']
                     else: 
-                        cols_to_show_ai = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected_CPICF_Cohort_Source_Mean']
-                        if 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df.columns:
-                             ai_display_df.rename(columns={'Projected_CPICF_Cohort_Source_Mean':'Projected CPICF (Mean)'}, inplace=True)
-                             ai_display_df['Projected CPICF (Mean)'] = ai_display_df['Projected CPICF (Mean)'].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else '-')
-                    ai_display_df_filtered = ai_display_df[[col for col in cols_to_show_ai if col in ai_display_df.columns]].copy()
-                    for col_n_ai in ai_display_df_filtered.columns:
-                        if 'Ad_Spend' in col_n_ai : ai_display_df_filtered[col_n_ai] = ai_display_df_filtered[col_n_ai].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int,float)) and pd.notna(x) else (x if isinstance(x,str) else '-'))
-                        elif 'QLs_POF' in col_n_ai or 'ICF_Landed' in col_n_ai: ai_display_df_filtered[col_n_ai] = ai_display_df_filtered[col_n_ai].apply(lambda x: f"{int(x):,}" if pd.notna(x) and isinstance(x,(int,float)) else (x if isinstance(x,str) else '-'))
-                    st.dataframe(ai_display_df_filtered.style.format(na_rep='-'))
-                    if proj_icf_variation_percent_sidebar > 0 and 'Projected CPICF (Low-Mean-High)' in ai_display_df_filtered.columns:
+                        cols_to_show_ai_res = ['Target_QLs_POF', 'Implied_Ad_Spend', 'Projected_ICF_Landed', 'Projected_CPICF_Cohort_Source_Mean']
+                        if 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df_res.columns:
+                             ai_display_df_res.rename(columns={'Projected_CPICF_Cohort_Source_Mean':'Projected CPICF (Mean)'}, inplace=True)
+                             ai_display_df_res['Projected CPICF (Mean)'] = ai_display_df_res['Projected CPICF (Mean)'].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else '-')
+                    ai_display_df_filtered_res = ai_display_df_res[[col for col in cols_to_show_ai_res if col in ai_display_df_res.columns]].copy()
+                    for col_n_ai_res in ai_display_df_filtered_res.columns:
+                        if 'Ad_Spend' in col_n_ai_res : ai_display_df_filtered_res[col_n_ai_res] = ai_display_df_filtered_res[col_n_ai_res].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int,float)) and pd.notna(x) else (x if isinstance(x,str) else '-'))
+                        elif 'QLs_POF' in col_n_ai_res or 'ICF_Landed' in col_n_ai_res: ai_display_df_filtered_res[col_n_ai_res] = ai_display_df_filtered_res[col_n_ai_res].apply(lambda x: f"{int(x):,}" if pd.notna(x) and isinstance(x,(int,float)) else (x if isinstance(x,str) else '-'))
+                    st.dataframe(ai_display_df_filtered_res.style.format(na_rep='-'))
+                    if proj_icf_variation_percent_sidebar > 0 and 'Projected CPICF (Low-Mean-High)' in ai_display_df_filtered_res.columns:
                         st.caption(f"Note: CPICF range based on +/- {proj_icf_variation_percent_sidebar}% ICF variation (set in sidebar).")
                     st.subheader("Projected ICFs Landed Over Time (AI Forecast)")
-                    ai_chart_data = ai_results_df[['Projected_ICF_Landed']].copy()
-                    if isinstance(ai_chart_data.index, pd.PeriodIndex): ai_chart_data.index = ai_chart_data.index.to_timestamp()
-                    ai_chart_data['Projected_ICF_Landed'] = pd.to_numeric(ai_chart_data['Projected_ICF_Landed'], errors='coerce').fillna(0)
-                    st.line_chart(ai_chart_data)
+                    ai_chart_data_res = ai_results_df[['Projected_ICF_Landed']].copy()
+                    if isinstance(ai_chart_data_res.index, pd.PeriodIndex): ai_chart_data_res.index = ai_chart_data_res.index.to_timestamp()
+                    ai_chart_data_res['Projected_ICF_Landed'] = pd.to_numeric(ai_chart_data_res['Projected_ICF_Landed'], errors='coerce').fillna(0)
+                    st.line_chart(ai_chart_data_res)
                 if not ai_site_df.empty:
                     st.subheader("AI Forecasted Site-Level Performance")
-                    ai_site_df_displayable = ai_site_df.copy()
-                    if ai_site_df_displayable.index.name != 'Site' and 'Site' in ai_site_df_displayable.columns: ai_site_df_displayable.set_index('Site', inplace=True)
-                    elif ai_site_df_displayable.index.name != 'Site' and 'Site' not in ai_site_df_displayable.columns and "Grand Total" in ai_site_df_displayable.index : ai_site_df_displayable.index.name = 'Site' 
-                    formatted_site_df_ai = ai_site_df_displayable.copy()
-                    if isinstance(formatted_site_df_ai.columns, pd.MultiIndex):
-                        formatted_site_df_ai.columns = [f"{col[1]} ({col[0]})" for col in formatted_site_df_ai.columns]
-                    for col_site_ai_name in formatted_site_df_ai.columns:
-                        if 'Projected QLs (POF)' in col_site_ai_name or 'Projected ICFs Landed' in col_site_ai_name:
-                            formatted_site_df_ai[col_site_ai_name] = formatted_site_df_ai[col_site_ai_name].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
-                    st.dataframe(formatted_site_df_ai.style.format(na_rep='-'))
+                    ai_site_df_displayable_res = ai_site_df.copy()
+                    if ai_site_df_displayable_res.index.name != 'Site' and 'Site' in ai_site_df_displayable_res.columns: ai_site_df_displayable_res.set_index('Site', inplace=True)
+                    elif ai_site_df_displayable_res.index.name != 'Site' and 'Site' not in ai_site_df_displayable_res.columns and "Grand Total" in ai_site_df_displayable_res.index : ai_site_df_displayable_res.index.name = 'Site' 
+                    formatted_site_df_ai_res = ai_site_df_displayable_res.copy()
+                    if isinstance(formatted_site_df_ai_res.columns, pd.MultiIndex):
+                        formatted_site_df_ai_res.columns = [f"{col[1]} ({col[0]})" for col in formatted_site_df_ai_res.columns]
+                    for col_site_ai_name_res in formatted_site_df_ai_res.columns:
+                        if 'Projected QLs (POF)' in col_site_ai_name_res or 'Projected ICFs Landed' in col_site_ai_name_res:
+                            formatted_site_df_ai_res[col_site_ai_name_res] = formatted_site_df_ai_res[col_site_ai_name_res].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "-")
+                    st.dataframe(formatted_site_df_ai_res.style.format(na_rep='-'))
                 else: st.info("Site-level AI forecast not available or sites not defined.")
         else: st.caption("Click the button above to generate the AI forecast based on your goals.")
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
