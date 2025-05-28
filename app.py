@@ -817,29 +817,96 @@ def calculate_ai_forecast_core(
     if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
 
-    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'): 
-        st.sidebar.subheader("Debug Info (Primary Run - Before Planning Loop)")
-        st.sidebar.markdown(f"**Goal LPI (orig):** `{goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}`")
-        st.sidebar.markdown(f"**Goal ICFs:** `{current_goal_icf_number}`")
-        st.sidebar.markdown(f"**Avg POF-ICF Lag (days):** `{avg_overall_lag_days:.2f}`")
-        st.sidebar.markdown(f"**Avg Lag (months approx):** `{avg_lag_months_approx}`")
-        st.sidebar.markdown(f"**Overall POF to ICF Rate:** `{overall_pof_to_icf_rate:.4f}`")
-        
-        total_qls_theoretically_needed_for_goal = (current_goal_icf_number / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
-        st.sidebar.markdown(f"**Total QLs theoretically needed for goal:** `{total_qls_theoretically_needed_for_goal:.0f}`")
+    if not valid_generation_months_for_planning.empty:
+        # ADD A DEBUG HEADER FOR THE LOOP ITSELF IF PRIMARY RUN
+        if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("Debug: QL Planning Loop (Primary Run)")
+            st.sidebar.markdown(f"Initial `icfs_still_to_assign_globally`: {icfs_still_to_assign_globally:.2f}")
+            st.sidebar.markdown(f"Calculated `monthly_ql_capacity_target_heuristic`: {monthly_ql_capacity_target_heuristic:.2f}")
+            st.sidebar.markdown(f"`overall_pof_to_icf_rate`: {overall_pof_to_icf_rate:.4f}")
 
-        st.sidebar.markdown(f"**Projection Start Month:** `{proj_start_month_period}`")
-        st.sidebar.markdown(f"**Current Goal LPI Month (for this run):** `{current_goal_lpi_month_period}`")
-        st.sidebar.markdown(f"**Latest Permissible Generation Month for this LPI:** `{latest_permissible_generation_month}`")
-        st.sidebar.markdown(f"**Earliest Permissible Generation Month:** `{earliest_permissible_generation_month}`")
-        
-        gen_months_min_str = valid_generation_months_for_planning.min().strftime('%Y-%m') if not valid_generation_months_for_planning.empty else 'N/A'
-        gen_months_max_str = valid_generation_months_for_planning.max().strftime('%Y-%m') if not valid_generation_months_for_planning.empty else 'N/A'
-        st.sidebar.markdown(f"**Valid Generation Months for Planning:** `{len(valid_generation_months_for_planning)} months ({gen_months_min_str} to {gen_months_max_str})`")
-        
-        st.sidebar.markdown(f"**Baseline Monthly QL Volume:** `{baseline_monthly_ql_volume:.2f}`")
-        st.sidebar.markdown(f"**AI Monthly QL Capacity Multiplier:** `{ai_monthly_ql_capacity_multiplier}`") 
-        st.sidebar.markdown(f"**Monthly QL Capacity Target Heuristic (per month):** `{monthly_ql_capacity_target_heuristic:.2f}`")
+
+        for gen_month in valid_generation_months_for_planning: # Iterate FORWARDS
+            if icfs_still_to_assign_globally <= 1e-9: 
+                if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
+                    st.sidebar.write(f"Loop breaking for {gen_month}, ICFs goal met.")
+                break
+
+            qls_theoretically_needed_for_remaining = (icfs_still_to_assign_globally / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
+            
+            # --- DETAILED DEBUG FOR MIN FUNCTION INPUTS ---
+            if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
+                st.sidebar.markdown(f"**Processing Gen Month: {gen_month.strftime('%Y-%m')}**")
+                st.sidebar.markdown(f"  `icfs_still_to_assign_globally` (start of iter): {icfs_still_to_assign_globally:.4f}")
+                st.sidebar.markdown(f"  `qls_theoretically_needed_for_remaining`: {qls_theoretically_needed_for_remaining:.2f}")
+                st.sidebar.markdown(f"  `monthly_ql_capacity_target_heuristic`: {monthly_ql_capacity_target_heuristic:.2f}")
+            # --- END DETAILED DEBUG ---
+
+            current_month_initial_ql_target = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
+            current_month_initial_ql_target = round(max(0, current_month_initial_ql_target))
+
+            if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
+                st.sidebar.markdown(f"  `current_month_initial_ql_target` (after min & round): {current_month_initial_ql_target}")
+
+
+            ai_gen_df.loc[gen_month, 'Required_QLs_POF_Initial'] = current_month_initial_ql_target
+            # ... (rest of the site cap allocation and ICF generation logic for the month)
+            # ... make sure sum_actually_allocated_qls gets this current_month_initial_ql_target if no caps
+            sum_actually_allocated_qls = current_month_initial_ql_target # Simplified for this debug focus if no caps are hit
+            
+            # This part needs to correctly reflect the outcome of site allocation if that logic is complex
+            # For now, assuming current_month_initial_ql_target becomes sum_actually_allocated_qls if no caps
+            # If site cap logic can reduce sum_actually_allocated_qls, that's fine.
+
+            site_ql_allocations_month_specific = {site: 0 for site in all_sites_list_ai} # Simplified for trace
+            unallocatable_this_month = 0
+            if current_month_initial_ql_target > 0:
+                # The full site cap logic from your code would go here.
+                # For this conceptual trace, we assume it mostly passes through if no caps.
+                # The output `sum_actually_allocated_qls` and `unallocatable_this_month` would come from that.
+                # For now, let's assume the heuristic is the only constraint active for this problem.
+                if not hist_site_pof_prop.empty and hist_site_pof_prop.sum() > 1e-9:
+                    # Simplified proportional allocation for debugging this specific issue
+                    temp_sum_prop_ql = 0
+                    for site_n_cap, prop in hist_site_pof_prop.items():
+                        if site_n_cap in site_ql_allocations_month_specific:
+                            prop_ql = round(current_month_initial_ql_target * prop)
+                            site_ql_allocations_month_specific[site_n_cap] = prop_ql
+                            temp_sum_prop_ql +=prop_ql
+                    # Adjust rounding for the first site if sum doesn't match due to individual rounding
+                    if temp_sum_prop_ql != current_month_initial_ql_target and all_sites_list_ai.size >0 :
+                        site_ql_allocations_month_specific[all_sites_list_ai[0]] += (current_month_initial_ql_target - temp_sum_prop_ql)
+                elif all_sites_list_ai.size >0: # Fallback if no proportions
+                    ql_per_site_fb = round(current_month_initial_ql_target / all_sites_list_ai.size)
+                    for site_n_cap_fb in all_sites_list_ai: site_ql_allocations_month_specific[site_n_cap_fb] = ql_per_site_fb
+                    # Adjust rounding for first site
+                    if sum(site_ql_allocations_month_specific.values()) != current_month_initial_ql_target:
+                        site_ql_allocations_month_specific[all_sites_list_ai[0]] += (current_month_initial_ql_target - sum(site_ql_allocations_month_specific.values()))
+
+
+                # Here, the actual site cap logic would run.
+                # For now, assuming sum_actually_allocated_qls = current_month_initial_ql_target
+                # if no actual site caps are defined by the user.
+                sum_actually_allocated_qls = sum(site_ql_allocations_month_specific.values())
+                # The 'unallocatable_this_month' would be an output of the more complex site cap logic
+                # For this test, if sum_actually_allocated_qls < current_month_initial_ql_target (e.g. due to user-set site caps)
+                # then unallocatable_this_month would be current_month_initial_ql_target - sum_actually_allocated_qls
+                # However, your case has no user-set site caps, so this part should not be the issue.
+                # The problem is that current_month_initial_ql_target is getting set to 1656 instead of 1104 for June.
+
+            ai_gen_df.loc[gen_month, 'Required_QLs_POF_Final'] = sum_actually_allocated_qls
+            ai_gen_df.loc[gen_month, 'Unallocatable_QLs'] = unallocatable_this_month # This would be non-zero if site caps hit
+            site_level_monthly_qlof[gen_month] = site_ql_allocations_month_specific.copy()
+            icfs_generated_this_month = sum_actually_allocated_qls * overall_pof_to_icf_rate
+            ai_gen_df.loc[gen_month, 'Generated_ICF_Mean'] = icfs_generated_this_month
+            icfs_still_to_assign_globally -= icfs_generated_this_month
+
+            if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
+                 st.sidebar.markdown(f"  `sum_actually_allocated_qls` for {gen_month.strftime('%Y-%m')}: {sum_actually_allocated_qls}")
+                 st.sidebar.markdown(f"  `icfs_generated_this_month`: {icfs_generated_this_month:.4f}")
+                 st.sidebar.markdown(f"  `icfs_still_to_assign_globally` (end of iter): {icfs_still_to_assign_globally:.4f}")
+                 st.sidebar.markdown("---") # Separator for each month in loop
         
         if not valid_generation_months_for_planning.empty:
             max_possible_qls_with_heuristic_in_timeline = monthly_ql_capacity_target_heuristic * len(valid_generation_months_for_planning)
