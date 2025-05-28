@@ -21,11 +21,6 @@ STAGE_SIGNED_ICF = "Signed ICF"
 STAGE_SCREEN_FAILED = "Screen Failed" 
 
 # --- Helper Functions ---
-# ... (All helper functions: parse_funnel_definition, parse_datetime_with_timezone, parse_history_string, 
-#      get_stage_timestamps, preprocess_referral_data, calculate_proforma_metrics, 
-#      calculate_avg_lag_generic, calculate_overall_inter_stage_lags, calculate_site_metrics, 
-#      score_sites, determine_effective_projection_rates, calculate_projections
-#      - UNCHANGED from the previous working version) ...
 @st.cache_data
 def parse_funnel_definition(uploaded_file):
     if uploaded_file is None: return None, None, None
@@ -708,7 +703,6 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         return default_return_tuple[0], avg_actual_lag_days_for_display if pd.notna(avg_actual_lag_days_for_display) else 30.0, "Error", "Error", pd.DataFrame(), f"Error: {e}"
 
 # --- MODIFIED: AI Forecast Core Function with Site Caps, Diminishing Returns, and Best Case Logic ---
-# @st.cache_data 
 def calculate_ai_forecast_core(
     goal_lpi_date_dt_orig: datetime, goal_icf_number_orig: int, estimated_cpql_user: float, 
     icf_variation_percent: float,
@@ -911,6 +905,7 @@ def calculate_ai_forecast_core(
     ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= current_goal_icf_number] 
     ads_off_date_str_calc = "Goal Not Met by End of Projection"
     if not ads_off_s.empty: ads_off_date_str_calc = ads_off_s.index[0].end_time.strftime('%Y-%m-%d')
+    
     ai_site_proj_df = pd.DataFrame() 
     if all_sites_list_ai.size > 0:
         site_data_coll_ai_final = {site: {} for site in all_sites_list_ai}
@@ -961,7 +956,7 @@ def calculate_ai_forecast_core(
         if actual_lpi_month_achieved_this_run <= current_goal_lpi_month_period:
             goal_met_on_time_this_run = True
 
-    total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum() if 'Unallocatable_QLs' in ai_gen_df else 0 # Ensure column exists
+    total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum() if 'Unallocatable_QLs' in ai_gen_df else 0 
     is_unfeasible_this_run = not goal_met_on_time_this_run or total_unallocated_qls_run > 0
 
     if run_mode == "primary" and is_unfeasible_this_run:
@@ -993,31 +988,39 @@ def calculate_ai_forecast_core(
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT achieved. Achieved {final_achieved_icfs_landed_run:.0f} ICFs by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')} (or end of extended projection)."
             is_unfeasible_this_run = True 
     
-    # Correct initialization of display_end_month_final
-    display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
+    # --- CORRECTED: Determine Display End Month ---
+    display_end_month_final = proj_start_month_period 
+    if not projection_calc_months.empty:
+        display_end_month_final = projection_calc_months[-1] 
     
     if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df:
         goal_met_series_for_trim = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= current_goal_icf_number]
         if not goal_met_series_for_trim.empty:
             lpi_achieved_month_for_trim_val = goal_met_series_for_trim.index.min()
             try: 
+                if not isinstance(lpi_achieved_month_for_trim_val, pd.Period):
+                    lpi_achieved_month_for_trim_val = pd.Period(lpi_achieved_month_for_trim_val, freq='M')
                 candidate_end_month_val = lpi_achieved_month_for_trim_val + pd.offsets.MonthEnd(3)
-                if isinstance(lpi_achieved_month_for_trim_val, pd.Period) and not isinstance(candidate_end_month_val, pd.Period):
-                     candidate_end_month_val = pd.Period(candidate_end_month_val, freq='M')
-                
-                calc_end = projection_calc_months.end if not projection_calc_months.empty else candidate_end_month_val
-                display_end_month_final = min(calc_end, candidate_end_month_val)
-            except Exception: 
-                display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
-        elif final_achieved_icfs_landed_run > 0 : 
-             display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
+                if isinstance(candidate_end_month_val, pd.Timestamp):
+                     candidate_end_month_val = candidate_end_month_val.to_period('M')
+                calc_end_for_min = projection_calc_months[-1] if not projection_calc_months.empty else candidate_end_month_val
+                display_end_month_final = min(calc_end_for_min, candidate_end_month_val)
+            except Exception as e_trim: 
+                if not projection_calc_months.empty:
+                    display_end_month_final = projection_calc_months[-1]
+        elif final_achieved_icfs_landed_run > 0 and not projection_calc_months.empty: 
+             display_end_month_final = projection_calc_months[-1] 
     
-    ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy() if not ai_results_df.empty and proj_start_month_period <= display_end_month_final else pd.DataFrame()
+    ai_results_df_final_display = pd.DataFrame() 
+    if not ai_results_df.empty and proj_start_month_period <= display_end_month_final:
+        try:
+            ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy()
+        except Exception as e_loc: 
+            pass 
     
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final_display, is_unfeasible_this_run, final_achieved_icfs_landed_run
 
 # --- Streamlit UI ---
-# ... (Session state initializations - UNCHANGED) ...
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
 if 'referral_data_processed' not in st.session_state: st.session_state.referral_data_processed = None
 if 'funnel_definition' not in st.session_state: st.session_state.funnel_definition = None
