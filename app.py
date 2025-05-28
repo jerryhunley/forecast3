@@ -1616,7 +1616,16 @@ if st.session_state.data_processed_successfully:
                     display_debug_gen_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
                     display_debug_gen_df.index = display_debug_gen_df.index.strftime('%Y-%m')
                     st.sidebar.dataframe(display_debug_gen_df)
-                    if 'ai_gen_df_debug_primary' in st.session_state: del st.session_state.ai_gen_df_debug_primary 
+                    if 'ai_gen_df_debug_primary' in st.session_state: del st.session_state.ai_gen_df_debug_primary
+
+ # --- ADD THE NEW BLOCK FOR ai_results_df_debug_primary HERE ---
+                if 'ai_results_df_debug_primary' in st.session_state and st.session_state.ai_results_df_debug_primary is not None: 
+                    st.sidebar.write("Primary Run ai_results_df (Landing Plan):")
+                    display_debug_results_df = st.session_state.ai_results_df_debug_primary[['Projected_ICF_Landed', 'Cumulative_ICF_Landed']].copy()
+                    display_debug_results_df.index = display_debug_results_df.index.strftime('%Y-%m')
+                    st.sidebar.dataframe(display_debug_results_df)
+                    if 'ai_results_df_debug_primary' in st.session_state: del st.session_state.ai_results_df_debug_primary
+            # --- END DEBUGGING ---
 
                 if 'ai_results_df_debug_primary' in st.session_state and st.session_state.ai_results_df_debug_primary is not None: 
                     st.sidebar.write("Primary Run ai_results_df (Landing Plan):")
