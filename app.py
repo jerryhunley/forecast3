@@ -902,18 +902,14 @@ def calculate_ai_forecast_core(
                 cpicf_m.loc[display_land_m] = g_data['Projected_CPICF_Mean']; cpicf_l.loc[display_land_m] = g_data['Projected_CPICF_Low']; cpicf_h.loc[display_land_m] = g_data['Projected_CPICF_High']
     ai_results_df['Projected_CPICF_Cohort_Source_Mean'] = cpicf_m; ai_results_df['Projected_CPICF_Cohort_Source_Low'] = cpicf_l; ai_results_df['Projected_CPICF_Cohort_Source_High'] = cpicf_h
     
-    # --- CORRECTED Ads Off Date Logic ---
+    # --- Ads Off Date Logic (Based on Original Goal ICFs) ---
     ai_gen_df['Cumulative_Generated_ICF_Final'] = ai_gen_df['Generated_ICF_Mean'].cumsum() 
+    ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= goal_icf_number_orig] # Check against ORIGINAL goal
     ads_off_date_str_calc = "Goal Not Met for Ads Off" 
-    total_generated_icfs_final_check = ai_gen_df['Generated_ICF_Mean'].sum()
-    if total_generated_icfs_final_check >= current_goal_icf_number:
-        goal_met_generation_series_check = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= current_goal_icf_number]
-        if not goal_met_generation_series_check.empty:
-            first_month_sufficient_generation = goal_met_generation_series_check.index[0]
-            ads_off_date_str_calc = first_month_sufficient_generation.end_time.strftime('%Y-%m-%d')
-        else: 
-            ads_off_date_str_calc = "Error: Check Ads Off Logic" # Should not be reached
-    # --- End Corrected Ads Off Date Logic ---
+    if not ads_off_s.empty:
+        first_month_sufficient_generation = ads_off_s.index[0]
+        ads_off_date_str_calc = first_month_sufficient_generation.end_time.strftime('%Y-%m-%d')
+    # --- End Ads Off Date Logic ---
             
     ai_site_proj_df = pd.DataFrame() 
     if all_sites_list_ai.size > 0:
@@ -966,7 +962,10 @@ def calculate_ai_forecast_core(
             goal_met_on_time_this_run = True
 
     total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum() if 'Unallocatable_QLs' in ai_gen_df else 0 
-    is_unfeasible_this_run = not goal_met_on_time_this_run or total_unallocated_qls_run > 0 or (ads_off_date_str_calc == "Goal Not Met for Ads Off" and goal_icf_number_orig > 0)
+    # Unfeasible if LPI goal for *this run* not met OR if QLs unallocated OR if original ICF goal not met by generation for ads off
+    is_unfeasible_this_run = not goal_met_on_time_this_run or \
+                             total_unallocated_qls_run > 0 or \
+                             (ads_off_date_str_calc == "Goal Not Met for Ads Off" and goal_icf_number_orig > 0)
 
 
     if run_mode == "primary" and is_unfeasible_this_run:
@@ -986,14 +985,14 @@ def calculate_ai_forecast_core(
     if run_mode == "primary": 
         if not is_unfeasible_this_run :
             feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear ACHIEVABLE."
-        else: # Primary goal had some issue even if LPI met
+        else: 
             feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) have caveats. "
-            if not goal_met_on_time_this_run:
+            if not goal_met_on_time_this_run: # LPI goal for this run (primary)
                  feasibility_msg_final_display += f"LPI target not met (actual: {actual_lpi_month_achieved_this_run.strftime('%Y-%m')}). "
             if total_unallocated_qls_run > 0:
                 feasibility_msg_final_display += f" {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
-            if ads_off_date_str_calc == "Goal Not Met for Ads Off":
-                 feasibility_msg_final_display += " Sufficient ICFs not generated to determine an Ads Off date."
+            if ads_off_date_str_calc == "Goal Not Met for Ads Off" and goal_icf_number_orig > 0: # Check original goal here
+                 feasibility_msg_final_display += " Sufficient ICFs not generated to determine an Ads Off date for original goal."
     
     elif run_mode == "best_case_extended_lpi":
         feasibility_msg_final_display = f"Original goal was unfeasible. Best Case Scenario (LPI extended to {current_goal_lpi_month_period.strftime('%Y-%m')} based on max horizon of {projection_horizon_months} months): "
