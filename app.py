@@ -901,16 +901,11 @@ def calculate_ai_forecast_core(
             if display_land_m in cpicf_m.index and pd.isna(cpicf_m.loc[display_land_m]):
                 cpicf_m.loc[display_land_m] = g_data['Projected_CPICF_Mean']; cpicf_l.loc[display_land_m] = g_data['Projected_CPICF_Low']; cpicf_h.loc[display_land_m] = g_data['Projected_CPICF_High']
     ai_results_df['Projected_CPICF_Cohort_Source_Mean'] = cpicf_m; ai_results_df['Projected_CPICF_Cohort_Source_Low'] = cpicf_l; ai_results_df['Projected_CPICF_Cohort_Source_High'] = cpicf_h
-    
-    # --- Ads Off Date Logic (Based on Original Goal ICFs) ---
     ai_gen_df['Cumulative_Generated_ICF_Final'] = ai_gen_df['Generated_ICF_Mean'].cumsum() 
-    ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= goal_icf_number_orig] # Check against ORIGINAL goal
-    ads_off_date_str_calc = "Goal Not Met for Ads Off" 
-    if not ads_off_s.empty:
-        first_month_sufficient_generation = ads_off_s.index[0]
-        ads_off_date_str_calc = first_month_sufficient_generation.end_time.strftime('%Y-%m-%d')
-    # --- End Ads Off Date Logic ---
-            
+    ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= current_goal_icf_number] 
+    ads_off_date_str_calc = "Goal Not Met by End of Projection"
+    if not ads_off_s.empty: ads_off_date_str_calc = ads_off_s.index[0].end_time.strftime('%Y-%m-%d')
+    
     ai_site_proj_df = pd.DataFrame() 
     if all_sites_list_ai.size > 0:
         site_data_coll_ai_final = {site: {} for site in all_sites_list_ai}
@@ -962,11 +957,7 @@ def calculate_ai_forecast_core(
             goal_met_on_time_this_run = True
 
     total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum() if 'Unallocatable_QLs' in ai_gen_df else 0 
-    # Unfeasible if LPI goal for *this run* not met OR if QLs unallocated OR if original ICF goal not met by generation for ads off
-    is_unfeasible_this_run = not goal_met_on_time_this_run or \
-                             total_unallocated_qls_run > 0 or \
-                             (ads_off_date_str_calc == "Goal Not Met for Ads Off" and goal_icf_number_orig > 0)
-
+    is_unfeasible_this_run = not goal_met_on_time_this_run or total_unallocated_qls_run > 0
 
     if run_mode == "primary" and is_unfeasible_this_run:
         st.sidebar.info("Original AI forecast goals appear unfeasible. Attempting best-case scenario by extending LPI to max projection horizon.")
@@ -983,30 +974,21 @@ def calculate_ai_forecast_core(
 
     feasibility_msg_final_display = ""
     if run_mode == "primary": 
-        if not is_unfeasible_this_run :
-            feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear ACHIEVABLE."
-        else: 
-            feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) have caveats. "
-            if not goal_met_on_time_this_run: # LPI goal for this run (primary)
-                 feasibility_msg_final_display += f"LPI target not met (actual: {actual_lpi_month_achieved_this_run.strftime('%Y-%m')}). "
-            if total_unallocated_qls_run > 0:
-                feasibility_msg_final_display += f" {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
-            if ads_off_date_str_calc == "Goal Not Met for Ads Off" and goal_icf_number_orig > 0: # Check original goal here
-                 feasibility_msg_final_display += " Sufficient ICFs not generated to determine an Ads Off date for original goal."
-    
+        feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear ACHIEVABLE."
+        if total_unallocated_qls_run > 0:
+            feasibility_msg_final_display += f" However, {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
+            is_unfeasible_this_run = True 
     elif run_mode == "best_case_extended_lpi":
         feasibility_msg_final_display = f"Original goal was unfeasible. Best Case Scenario (LPI extended to {current_goal_lpi_month_period.strftime('%Y-%m')} based on max horizon of {projection_horizon_months} months): "
-        if goal_met_on_time_this_run and ads_off_date_str_calc != "Goal Not Met for Ads Off": 
+        if goal_met_on_time_this_run: 
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs achieved by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')}."
             if total_unallocated_qls_run > 0:
-                feasibility_msg_final_display += f" Note: {total_unallocated_qls_run:.0f} QLs were unallocatable."
+                feasibility_msg_final_display += f" Note: {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
         else: 
-            feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT fully achieved as planned. Achieved {final_achieved_icfs_landed_run:.0f} ICFs."
-            if total_unallocated_qls_run > 0:
-                 feasibility_msg_final_display += f" {total_unallocated_qls_run:.0f} QLs were unallocatable."
-            if ads_off_date_str_calc == "Goal Not Met for Ads Off":
-                 feasibility_msg_final_display += " Sufficient ICFs not generated for Ads Off."
+            feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT achieved. Achieved {final_achieved_icfs_landed_run:.0f} ICFs by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')} (or end of extended projection)."
+            is_unfeasible_this_run = True 
     
+    # --- CORRECTED: Determine Display End Month ---
     display_end_month_final = proj_start_month_period 
     if not projection_calc_months.empty:
         display_end_month_final = projection_calc_months[-1] 
@@ -1033,7 +1015,8 @@ def calculate_ai_forecast_core(
     if not ai_results_df.empty and proj_start_month_period <= display_end_month_final:
         try:
             ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy()
-        except Exception as e_loc: pass 
+        except Exception as e_loc: 
+            pass 
     
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final_display, is_unfeasible_this_run, final_achieved_icfs_landed_run
 
@@ -1406,7 +1389,6 @@ if st.session_state.data_processed_successfully:
             with ai_cols_rate_man[1]:
                  ai_manual_conv_rates_tab_input_val[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("AI: StS -> Appt %", 0.0, 100.0, 50.0, step=0.1, format="%.1f%%", key='ai_cr_sa_v5') / 100.0
                  ai_manual_conv_rates_tab_input_val[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("AI: Appt -> ICF %", 0.0, 100.0, 60.0, step=0.1, format="%.1f%%", key='ai_cr_ai_v5') / 100.0
-        
         st.markdown("---"); st.subheader("Site-Specific Monthly QL (POF) Caps (Optional)")
         default_site_caps_ai_input_val = {} 
         if not site_metrics_calculated_data.empty and 'Site' in site_metrics_calculated_data.columns and referral_data_processed is not None:
@@ -1418,7 +1400,6 @@ if st.session_state.data_processed_successfully:
                 if not pd.api.types.is_period_dtype(temp_df_for_avg_val['Submission_Month']):
                     try: temp_df_for_avg_val['Submission_Month'] = temp_df_for_avg_val['Submission_Month'].dt.to_period('M')
                     except AttributeError: temp_df_for_avg_val['Submission_Month'] = pd.Series(temp_df_for_avg_val['Submission_Month'], dtype="period[M]")
-
                 site_monthly_counts_for_avg_val = temp_df_for_avg_val.dropna(subset=[ts_pof_col_for_avg_calc_val]).groupby(['Site', 'Submission_Month']).size().reset_index(name='MonthlyPOFCount')
                 if not site_monthly_counts_for_avg_val.empty:
                     avg_monthly_ql_per_site_val = site_monthly_counts_for_avg_val.groupby('Site')['MonthlyPOFCount'].mean().round(0).astype(int).to_dict()
@@ -1436,7 +1417,6 @@ if st.session_state.data_processed_successfully:
             else: st.caption("No site data available to set caps.")
         else: st.caption("Site performance data or referral data not available for setting caps.")
         st.markdown("---")
-
         if selected_rate_method_label_ai_tab == "Manual Input Below":
             ai_effective_rates = ai_manual_conv_rates_tab_input_val
             ai_rates_method_desc = "Manual Input for AI Forecast"
@@ -1449,7 +1429,6 @@ if st.session_state.data_processed_successfully:
                 st.warning(f"Could not determine reliable '{selected_rate_method_label_ai_tab}' rates for AI Forecast ({ai_rates_method_desc}). Using manual rates from sidebar as fallback.")
                 ai_effective_rates = manual_proj_conv_rates_sidebar 
                 ai_rates_method_desc = f"Manual (Fallback from Projections Tab Sidebar due to issue with '{selected_rate_method_label_ai_tab}')"
-        
         pof_ts_col_ai = ts_col_map.get(STAGE_PASSED_ONLINE_FORM); icf_ts_col_ai = ts_col_map.get(STAGE_SIGNED_ICF)
         avg_pof_icf_lag_ai = np.nan
         if pof_ts_col_ai and icf_ts_col_ai and pof_ts_col_ai in referral_data_processed.columns and icf_ts_col_ai in referral_data_processed.columns:
@@ -1483,12 +1462,7 @@ if st.session_state.data_processed_successfully:
                 goal_display_val = f"{ai_goal_icf_num:,}"
                 if ai_unfeasible and ai_actual_icfs < ai_goal_icf_num : goal_display_val = f"{ai_actual_icfs:,} (Goal: {ai_goal_icf_num:,})"
                 ai_col2_res.metric("Projected/Goal ICFs", goal_display_val)
-                
-                ads_off_display_message = ai_ads_off 
-                if ai_ads_off == "Goal Not Met for Ads Off": ads_off_display_message = "Goal Unmet for Ads Off"
-                elif ai_ads_off == "Required Through End of Plan": ads_off_display_message = "Through End of Plan"
-                ai_col3_res.metric("Est. Ads Off Date", ads_off_display_message)
-
+                ai_col3_res.metric("Est. Ads Off Date", ai_ads_off if ai_ads_off != "N/A" else "Past LPI/Goal Unmet")
                 if not ai_results_df.empty:
                     st.subheader("AI Forecasted Monthly Performance")
                     ai_display_df_res = ai_results_df.copy(); 
