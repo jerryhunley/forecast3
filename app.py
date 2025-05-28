@@ -816,6 +816,38 @@ def calculate_ai_forecast_core(
     monthly_ql_capacity_target_heuristic = baseline_monthly_ql_volume * backloading_ql_capacity_multiplier
     if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
+    # --- DEBUGGING STATEMENTS (Primary Run - Before Backloading) ---
+    if run_mode == "primary":
+        st.sidebar.subheader("Debug Info (Primary Run - Before Backloading)")
+        st.sidebar.markdown(f"**Goal LPI (orig):** `{goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}`")
+        st.sidebar.markdown(f"**Goal ICFs:** `{current_goal_icf_number}`")
+        st.sidebar.markdown(f"**Avg POF-ICF Lag (days):** `{avg_overall_lag_days:.2f}`")
+        st.sidebar.markdown(f"**Avg Lag (months approx):** `{avg_lag_months_approx}`")
+        st.sidebar.markdown(f"**Overall POF to ICF Rate:** `{overall_pof_to_icf_rate:.4f}`")
+        
+        total_qls_theoretically_needed_for_goal = (current_goal_icf_number / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
+        st.sidebar.markdown(f"**Total QLs theoretically needed for goal:** `{total_qls_theoretically_needed_for_goal:.0f}`")
+
+        st.sidebar.markdown(f"**Projection Start Month:** `{proj_start_month_period}`")
+        st.sidebar.markdown(f"**Current Goal LPI Month (for this run):** `{current_goal_lpi_month_period}`")
+        st.sidebar.markdown(f"**Latest Permissible Generation Month for this LPI:** `{latest_permissible_generation_month}`")
+        st.sidebar.markdown(f"**Earliest Permissible Generation Month:** `{earliest_permissible_generation_month}`")
+        
+        gen_months_min_str = valid_generation_months_for_backloading.min().strftime('%Y-%m') if not valid_generation_months_for_backloading.empty else 'N/A'
+        gen_months_max_str = valid_generation_months_for_backloading.max().strftime('%Y-%m') if not valid_generation_months_for_backloading.empty else 'N/A'
+        st.sidebar.markdown(f"**Valid Generation Months for Backloading:** `{len(valid_generation_months_for_backloading)} months ({gen_months_min_str} to {gen_months_max_str})`")
+        
+        st.sidebar.markdown(f"**Baseline Monthly QL Volume:** `{baseline_monthly_ql_volume:.2f}`")
+        st.sidebar.markdown(f"**Backloading QL Capacity Multiplier:** `{backloading_ql_capacity_multiplier}`")
+        st.sidebar.markdown(f"**Monthly QL Capacity Target Heuristic (per month):** `{monthly_ql_capacity_target_heuristic:.2f}`")
+        
+        if not valid_generation_months_for_backloading.empty:
+            max_possible_qls_with_heuristic_in_timeline = monthly_ql_capacity_target_heuristic * len(valid_generation_months_for_backloading)
+            st.sidebar.markdown(f"**Max QLs plannable in timeline with heuristic:** `{max_possible_qls_with_heuristic_in_timeline:.0f}`")
+        else:
+            st.sidebar.markdown("**No valid generation months for primary LPI target.**")
+    # --- END DEBUGGING ---
+
     site_level_monthly_qlof = {}
     all_sites_list_ai = site_metrics_df['Site'].unique() if not site_metrics_df.empty and 'Site' in site_metrics_df else np.array([])
     hist_site_pof_prop = pd.Series(dtype=float)
@@ -897,6 +929,8 @@ def calculate_ai_forecast_core(
             ai_gen_df.loc[gen_month, 'Generated_ICF_Mean'] = icfs_generated_this_month
             icfs_still_to_assign_globally -= icfs_generated_this_month
     else: 
+        if run_mode == "primary": 
+            st.sidebar.error("Primary run: No valid generation months for backloading (LPI likely too soon or projection too short).")
         if icfs_still_to_assign_globally > 1e-9: 
             first_possible_landing_month_check = proj_start_month_period + avg_lag_months_approx
             feasibility_details = f"Goal LPI ({current_goal_lpi_month_period.strftime('%Y-%m')}) combined with lag ({avg_overall_lag_days:.1f} days) results in no valid generation months within the projection window. Minimum landing month: {first_possible_landing_month_check.strftime('%Y-%m')}."
@@ -1070,6 +1104,11 @@ def calculate_ai_forecast_core(
         try:
             ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy()
         except Exception: pass
+    
+    # Store ai_gen_df for debugging if in primary run
+    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'session_state'): # Check if streamlit context exists
+        st.session_state.ai_gen_df_debug_primary = ai_gen_df.copy()
+
 
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final_display, is_unfeasible_this_run, final_achieved_icfs_landed_run
 # --- END OF AI FORECAST CORE FUNCTION ---
@@ -1092,10 +1131,9 @@ weights_normalized = {}; proj_horizon_sidebar = 12
 proj_spend_dict_sidebar = {}; proj_cpqr_dict_sidebar = {}; manual_proj_conv_rates_sidebar = {}
 use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3; goal_icf_count_sidebar = 100
 proj_icf_variation_percent_sidebar = 10
-# Removed ai_rate_assumption_method_tab, ai_rolling_window_months_tab, ai_manual_conv_rates_tab as they are handled per tab run
-ai_cpql_inflation_factor_sidebar = 0.0 # Default, controlled by slider
-ai_ql_volume_threshold_sidebar = 10.0 # Default, controlled by slider
-ai_backloading_heuristic_multiplier_sidebar_val = 3.0 # Default, controlled by new slider
+ai_cpql_inflation_factor_sidebar = 0.0 
+ai_ql_volume_threshold_sidebar = 10.0 
+ai_backloading_heuristic_multiplier_sidebar_val = 3.0 # Default for the new slider
 
 with st.sidebar:
     st.header("⚙️ Setup")
@@ -1184,7 +1222,7 @@ with st.sidebar:
              manual_proj_conv_rates_sidebar[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("Manual: Appt -> ICF %", 0.0, 100.0, 35.0, step=0.1, format="%.1f%%", key='cr_ai_v2') / 100.0
         use_rolling_flag_sidebar = (rate_assumption_method_sidebar == 'Rolling Historical Average')
         if use_rolling_flag_sidebar:
-            rolling_window_months_sidebar = st.selectbox("Select Rolling Window (Months):", [1, 3, 6, 999], index=1, format_func=lambda x: "Overall Average" if x==999 else f"{x}-Month", key='rolling_window_v2_sel') # 999 for overall
+            rolling_window_months_sidebar = st.selectbox("Select Rolling Window (Months):", [1, 3, 6, 999], index=1, format_func=lambda x: "Overall Average" if x==999 else f"{x}-Month", key='rolling_window_v2_sel') 
             if st.session_state.data_processed_successfully and st.session_state.referral_data_processed is not None and \
                st.session_state.ordered_stages is not None and st.session_state.ts_col_map is not None:
                 determine_effective_projection_rates(
@@ -1210,7 +1248,6 @@ with st.sidebar:
             "QL Volume Increase Threshold (%) for Inflation", 1.0, 50.0, 10.0, 1.0, key="ai_ql_vol_thresh_v2",
             help="Inflation applies for every X% increase in monthly QLs over historical baseline."
         )
-        # --- ADDED SLIDER FOR BACKLOADING MULTIPLIER ---
         ai_backloading_heuristic_multiplier_sidebar_val = st.slider(
             "AI: Backloading QL Capacity Multiplier",
             min_value=1.0, max_value=30.0, value=3.0, step=0.5,
@@ -1480,7 +1517,7 @@ if st.session_state.data_processed_successfully:
         else: st.caption("Site performance data or referral data not available for setting caps.")
         st.markdown("---")
 
-        if st.button("🚀 Generate AI Forecast", key="run_ai_forecast_v5"): # Incremented key
+        if st.button("🚀 Generate AI Forecast", key="run_ai_forecast_v5"): 
             st.session_state.ai_forecast_results = None 
 
             if selected_rate_method_label_ai_tab == "Manual Input Below":
@@ -1521,7 +1558,7 @@ if st.session_state.data_processed_successfully:
                     site_caps_input=default_site_caps_ai_input_val, site_scoring_weights_for_ai=weights_normalized,
                     cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                     run_mode=run_mode_for_call_primary,
-                    backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val # Using slider value
+                    backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val 
                 )
                 st.session_state.ai_forecast_results = {
                     'df': ai_results_df_run1, 'site_df': ai_site_df_run1, 'ads_off': ai_ads_off_run1,
@@ -1543,7 +1580,7 @@ if st.session_state.data_processed_successfully:
                         site_caps_input=default_site_caps_ai_input_val, site_scoring_weights_for_ai=weights_normalized,
                         cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                         run_mode=run_mode_for_call_best_case,
-                        backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val # Using slider value
+                        backloading_ql_capacity_multiplier=ai_backloading_heuristic_multiplier_sidebar_val 
                     )
                     st.session_state.ai_forecast_results = {
                         'df': ai_results_df_run2, 'site_df': ai_site_df_run2, 'ads_off': ai_ads_off_run2,
@@ -1559,8 +1596,6 @@ if st.session_state.data_processed_successfully:
             ai_message = results['message']
             ai_unfeasible = results['unfeasible']
             ai_actual_icfs = results['actual_icfs']
-            # display_lpi_goal = results['lpi_goal'] # Using the original goal for display consistency
-            # display_icf_goal = results['icf_goal']
 
             st.markdown("---")
             if "best_case_extended_lpi" in results.get('run_mode_displayed','primary') and not ai_unfeasible :
@@ -1568,9 +1603,22 @@ if st.session_state.data_processed_successfully:
             elif ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
             else: st.success(f"Forecast Status: {ai_message}")
 
+            # --- DEBUGGING STATEMENTS (Primary Run - After Calc) ---
+            if results.get('run_mode_displayed') == "primary" and 'st' in globals() and hasattr(st, 'session_state'):
+                if 'ai_gen_df_debug_primary' in st.session_state and st.session_state.ai_gen_df_debug_primary is not None:
+                    st.sidebar.subheader("Debug Info (Primary Run - After Calc)")
+                    st.sidebar.markdown(f"**Message:** `{results['message']}`")
+                    st.sidebar.markdown(f"**Unfeasible:** `{results['unfeasible']}`")
+                    st.sidebar.markdown(f"**Actual ICFs Achieved (Primary):** `{results['actual_icfs']:.1f}`")
+                    st.sidebar.write("Primary Run ai_gen_df (QLs Final & ICF Gen):")
+                    display_debug_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
+                    display_debug_df.index = display_debug_df.index.strftime('%Y-%m')
+                    st.sidebar.dataframe(display_debug_df)
+                    del st.session_state.ai_gen_df_debug_primary # Clean up after display
+            # --- END DEBUGGING ---
 
             ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
-            ai_col1_res.metric("Target LPI Date (Original Goal)", ai_goal_lpi_date.strftime("%Y-%m-%d")) # Show original goal LPI
+            ai_col1_res.metric("Target LPI Date (Original Goal)", ai_goal_lpi_date.strftime("%Y-%m-%d")) 
             goal_display_val = f"{ai_goal_icf_num:,}"
             if ai_unfeasible and ai_actual_icfs < ai_goal_icf_num : goal_display_val = f"{ai_actual_icfs:,} (Original Goal: {ai_goal_icf_num:,})"
             elif "best_case_extended_lpi" in results.get('run_mode_displayed','primary') and ai_actual_icfs < ai_goal_icf_num:
