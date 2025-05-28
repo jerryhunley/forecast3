@@ -714,7 +714,7 @@ def calculate_ai_forecast_core(
     icf_variation_percent: float,
     processed_df: pd.DataFrame, ordered_stages: list, ts_col_map: dict, 
     effective_projection_conv_rates: dict, avg_overall_lag_days: float, 
-    site_metrics_df: pd.DataFrame, projection_horizon_months: int, # This is max horizon for best case
+    site_metrics_df: pd.DataFrame, projection_horizon_months: int, 
     site_caps_input: dict, 
     site_scoring_weights_for_ai: dict, 
     cpql_inflation_factor_pct: float, 
@@ -732,8 +732,7 @@ def calculate_ai_forecast_core(
     if cpql_inflation_factor_pct < 0 or ql_vol_increase_threshold_pct < 0:
          return default_return_ai[0], default_return_ai[1], default_return_ai[2], "CPQL inflation parameters cannot be negative.", True, 0
 
-    # --- Define ts_pof_col_for_prop earlier ---
-    ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM) # Used for historical proportions and baseline
+    ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM) 
 
     main_funnel_path_segments = [
         f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}",
@@ -752,8 +751,8 @@ def calculate_ai_forecast_core(
 
     last_hist_month = processed_df["Submission_Month"].max() if "Submission_Month" in processed_df and not processed_df["Submission_Month"].empty else pd.Period(datetime.now(), freq='M') - 1
     proj_start_month_period = last_hist_month + 1
-    current_goal_lpi_month_period = pd.Period(goal_lpi_date_dt_orig, freq='M') # Use _orig for the user's initial goal
-    current_goal_icf_number = goal_icf_number_orig # Use _orig for the user's initial goal
+    current_goal_lpi_month_period = pd.Period(goal_lpi_date_dt_orig, freq='M') 
+    current_goal_icf_number = goal_icf_number_orig 
 
     max_possible_proj_end_month = proj_start_month_period + projection_horizon_months - 1
     if run_mode == "best_case_extended_lpi":
@@ -771,7 +770,7 @@ def calculate_ai_forecast_core(
     num_months_for_landing = len(landing_window_months)
     if num_months_for_landing == 0: 
         return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Landing window has zero months. Check LPI date.", True, 0
-    target_icfs_to_land_per_month = current_goal_icf_number / num_months_for_landing # Use current_goal_icf_number
+    target_icfs_to_land_per_month = current_goal_icf_number / num_months_for_landing 
     
     calc_horizon_end_month = min(max_possible_proj_end_month, current_goal_lpi_month_period + avg_lag_months_approx + 3) 
     projection_calc_months = pd.period_range(start=proj_start_month_period, end=calc_horizon_end_month, freq='M')
@@ -790,7 +789,6 @@ def calculate_ai_forecast_core(
     ai_gen_df['Required_QLs_POF_Initial'] = (ai_gen_df['Target_Generated_ICF_Mean_Initial'] / overall_pof_to_icf_rate).round(0).astype(int)
     
     baseline_monthly_ql_volume = 1.0 
-    # ts_pof_col_for_baseline was already defined as ts_pof_col_for_prop
     if ts_pof_col_for_prop and ts_pof_col_for_prop in processed_df.columns and not processed_df.empty and 'Submission_Month' in processed_df.columns:
         valid_pof_df_baseline = processed_df[processed_df[ts_pof_col_for_prop].notna()]
         if not valid_pof_df_baseline.empty:
@@ -963,7 +961,7 @@ def calculate_ai_forecast_core(
         if actual_lpi_month_achieved_this_run <= current_goal_lpi_month_period:
             goal_met_on_time_this_run = True
 
-    total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum()
+    total_unallocated_qls_run = ai_gen_df['Unallocatable_QLs'].sum() if 'Unallocatable_QLs' in ai_gen_df else 0 # Ensure column exists
     is_unfeasible_this_run = not goal_met_on_time_this_run or total_unallocated_qls_run > 0
 
     if run_mode == "primary" and is_unfeasible_this_run:
@@ -980,30 +978,39 @@ def calculate_ai_forecast_core(
         )
 
     feasibility_msg_final_display = ""
-    if run_mode == "primary": # This means primary goal was met if we reached here
+    if run_mode == "primary": 
         feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear ACHIEVABLE."
         if total_unallocated_qls_run > 0:
             feasibility_msg_final_display += f" However, {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
-            is_unfeasible_this_run = True # Still mark as unfeasible due to caveats
-    
+            is_unfeasible_this_run = True 
     elif run_mode == "best_case_extended_lpi":
-        feasibility_msg_final_display = f"Original goal was unfeasible. Best Case Scenario (LPI extended to {current_goal_lpi_month_period.strftime('%Y-%m')}): "
+        feasibility_msg_final_display = f"Original goal was unfeasible. Best Case Scenario (LPI extended to {current_goal_lpi_month_period.strftime('%Y-%m')} based on max horizon of {projection_horizon_months} months): "
         if goal_met_on_time_this_run: 
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs achieved by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')}."
             if total_unallocated_qls_run > 0:
                 feasibility_msg_final_display += f" Note: {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps."
         else: 
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT achieved. Achieved {final_achieved_icfs_landed_run:.0f} ICFs by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')} (or end of extended projection)."
-            is_unfeasible_this_run = True # Mark best case as unfeasible if goal still not met
+            is_unfeasible_this_run = True 
     
-    display_end_month_final = final_proj_end_month 
+    # Correct initialization of display_end_month_final
+    display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
+    
     if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df:
-        if not ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= current_goal_icf_number].empty:
-            lpi_achieved_month_for_trim_val = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= current_goal_icf_number].index.min()
-            candidate_end_month_val = lpi_achieved_month_for_trim_val + pd.offsets.MonthEnd(3)
-            if isinstance(candidate_end_month_val, pd.Timestamp): candidate_end_month_val = candidate_end_month_val.to_period('M')
-            display_end_month_final = min(final_proj_end_month, candidate_end_month_val)
-        elif final_achieved_icfs_landed_run > 0 : display_end_month_final = final_proj_end_month
+        goal_met_series_for_trim = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= current_goal_icf_number]
+        if not goal_met_series_for_trim.empty:
+            lpi_achieved_month_for_trim_val = goal_met_series_for_trim.index.min()
+            try: 
+                candidate_end_month_val = lpi_achieved_month_for_trim_val + pd.offsets.MonthEnd(3)
+                if isinstance(lpi_achieved_month_for_trim_val, pd.Period) and not isinstance(candidate_end_month_val, pd.Period):
+                     candidate_end_month_val = pd.Period(candidate_end_month_val, freq='M')
+                
+                calc_end = projection_calc_months.end if not projection_calc_months.empty else candidate_end_month_val
+                display_end_month_final = min(calc_end, candidate_end_month_val)
+            except Exception: 
+                display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
+        elif final_achieved_icfs_landed_run > 0 : 
+             display_end_month_final = projection_calc_months.end if not projection_calc_months.empty else proj_start_month_period
     
     ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy() if not ai_results_df.empty and proj_start_month_period <= display_end_month_final else pd.DataFrame()
     
@@ -1183,7 +1190,6 @@ if st.session_state.data_processed_successfully:
     st.markdown("---"); tab1, tab2, tab3, tab_ai = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections", "🤖 AI Forecast"])
     
     with tab1: 
-        # ... (Tab 1 content - UNCHANGED) ...
         st.header("Monthly ProForma (Historical Cohorts)")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and ad_spend_input_dict:
             proforma_df_tab1 = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict)
@@ -1197,7 +1203,6 @@ if st.session_state.data_processed_successfully:
         else: st.warning("ProForma cannot be calculated until data is loaded and historical ad spend is entered.")
 
     with tab2: 
-        # ... (Tab 2 content - UNCHANGED) ...
         st.header("Site Performance Ranking")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized and not site_metrics_calculated_data.empty:
             ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized)
@@ -1221,7 +1226,6 @@ if st.session_state.data_processed_successfully:
         else: st.warning("Site performance cannot be ranked until data is loaded and weights are set.")
 
     with tab3: 
-        # ... (Tab 3 content - UNCHANGED) ...
         st.header("Projections (Based on Future Spend)")
         effective_proj_rates_tab3, method_desc_tab3 = determine_effective_projection_rates(
             referral_data_processed, ordered_stages, ts_col_map, rate_assumption_method_sidebar,
