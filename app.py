@@ -906,16 +906,20 @@ def calculate_ai_forecast_core(
             if display_land_m in cpicf_m.index and pd.isna(cpicf_m.loc[display_land_m]):
                 cpicf_m.loc[display_land_m] = g_data['Projected_CPICF_Mean']; cpicf_l.loc[display_land_m] = g_data['Projected_CPICF_Low']; cpicf_h.loc[display_land_m] = g_data['Projected_CPICF_High']
     ai_results_df['Projected_CPICF_Cohort_Source_Mean'] = cpicf_m; ai_results_df['Projected_CPICF_Cohort_Source_Low'] = cpicf_l; ai_results_df['Projected_CPICF_Cohort_Source_High'] = cpicf_h
+    
+    # --- CORRECTED Ads Off Date Logic ---
     ai_gen_df['Cumulative_Generated_ICF_Final'] = ai_gen_df['Generated_ICF_Mean'].cumsum() 
-    ads_off_s = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= current_goal_icf_number] 
-    ads_off_date_str_calc = "Goal Not Met for Ads Off" # Default if goal not met
-    if not ads_off_s.empty:
-        first_month_goal_met_gen = ads_off_s.index[0]
-        last_gen_month_with_icfs = ai_gen_df[ai_gen_df['Target_Generated_ICF_Mean_Initial'] > 0].index.max() if not ai_gen_df[ai_gen_df['Target_Generated_ICF_Mean_Initial'] > 0].empty else None
-        if last_gen_month_with_icfs and first_month_goal_met_gen <= last_gen_month_with_icfs:
-             ads_off_date_str_calc = first_month_goal_met_gen.end_time.strftime('%Y-%m-%d')
-        else: # Goal met by momentum or exactly at end of plan
-            ads_off_date_str_calc = "Required Through End of Plan"
+    ads_off_date_str_calc = "Goal Not Met for Ads Off" 
+    total_generated_icfs_final_check = ai_gen_df['Generated_ICF_Mean'].sum()
+
+    if total_generated_icfs_final_check >= current_goal_icf_number:
+        goal_met_generation_series_check = ai_gen_df[ai_gen_df['Cumulative_Generated_ICF_Final'] >= current_goal_icf_number]
+        if not goal_met_generation_series_check.empty:
+            first_month_gen_goal_met_check = goal_met_generation_series_check.index[0]
+            ads_off_date_str_calc = first_month_gen_goal_met_check.end_time.strftime('%Y-%m-%d')
+        else: # Should not be reached if total_generated_icfs_final_check >= current_goal_icf_number
+            ads_off_date_str_calc = "Error: Check Ads Off Logic" 
+    # --- End Ads Off Date Logic Correction ---
             
     ai_site_proj_df = pd.DataFrame() 
     if all_sites_list_ai.size > 0:
@@ -999,7 +1003,7 @@ def calculate_ai_forecast_core(
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT achieved. Achieved {final_achieved_icfs_landed_run:.0f} ICFs by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')} (or end of extended projection)."
             is_unfeasible_this_run = True 
     
-    # --- CORRECTED: Determine Display End Month ---
+    # Determine Display End Month
     display_end_month_final = proj_start_month_period 
     if not projection_calc_months.empty:
         display_end_month_final = projection_calc_months[-1] 
@@ -1401,7 +1405,6 @@ if st.session_state.data_processed_successfully:
                  ai_manual_conv_rates_tab_input_val[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("AI: StS -> Appt %", 0.0, 100.0, 50.0, step=0.1, format="%.1f%%", key='ai_cr_sa_v5') / 100.0
                  ai_manual_conv_rates_tab_input_val[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("AI: Appt -> ICF %", 0.0, 100.0, 60.0, step=0.1, format="%.1f%%", key='ai_cr_ai_v5') / 100.0
         
-        # Site Cap Inputs
         st.markdown("---"); st.subheader("Site-Specific Monthly QL (POF) Caps (Optional)")
         default_site_caps_ai_input_val = {} 
         if not site_metrics_calculated_data.empty and 'Site' in site_metrics_calculated_data.columns and referral_data_processed is not None:
@@ -1432,7 +1435,6 @@ if st.session_state.data_processed_successfully:
         else: st.caption("Site performance data or referral data not available for setting caps.")
         st.markdown("---")
 
-        # Get effective rates based on selection
         if selected_rate_method_label_ai_tab == "Manual Input Below":
             ai_effective_rates = ai_manual_conv_rates_tab_input_val
             ai_rates_method_desc = "Manual Input for AI Forecast"
@@ -1450,7 +1452,6 @@ if st.session_state.data_processed_successfully:
         avg_pof_icf_lag_ai = np.nan
         if pof_ts_col_ai and icf_ts_col_ai and pof_ts_col_ai in referral_data_processed.columns and icf_ts_col_ai in referral_data_processed.columns:
             avg_pof_icf_lag_ai = calculate_avg_lag_generic(referral_data_processed, pof_ts_col_ai, icf_ts_col_ai)
-        
         avg_lag_to_use_for_ai = avg_pof_icf_lag_ai
         lag_source_message_ai = f"Calculated Historical POF-ICF lag: {avg_pof_icf_lag_ai:.1f} days" if pd.notna(avg_pof_icf_lag_ai) else "POF-ICF lag calculation failed."
         if pd.isna(avg_lag_to_use_for_ai):
@@ -1475,14 +1476,13 @@ if st.session_state.data_processed_successfully:
                 st.markdown("---")
                 if ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
                 else: st.success(f"Forecast Status: {ai_message}")
-                
                 ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
                 ai_col1_res.metric("Target LPI Date", ai_goal_lpi_date.strftime("%Y-%m-%d"))
                 goal_display_val = f"{ai_goal_icf_num:,}"
                 if ai_unfeasible and ai_actual_icfs < ai_goal_icf_num : goal_display_val = f"{ai_actual_icfs:,} (Goal: {ai_goal_icf_num:,})"
                 ai_col2_res.metric("Projected/Goal ICFs", goal_display_val)
                 
-                ads_off_display_message = ai_ads_off # Default to the calculated string
+                ads_off_display_message = ai_ads_off 
                 if ai_ads_off == "Goal Not Met for Ads Off": ads_off_display_message = "Goal Unmet for Ads Off"
                 elif ai_ads_off == "Required Through End of Plan": ads_off_display_message = "Through End of Plan"
                 ai_col3_res.metric("Est. Ads Off Date", ads_off_display_message)
