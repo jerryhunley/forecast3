@@ -729,7 +729,7 @@ def calculate_ai_forecast_core(
     cpql_inflation_factor_pct: float,
     ql_vol_increase_threshold_pct: float,
     run_mode: str = "primary",
-    ai_monthly_ql_capacity_multiplier: float = 3.0 # RENAMED
+    ai_monthly_ql_capacity_multiplier: float = 3.0 
 ):
     default_return_ai = pd.DataFrame(), pd.DataFrame(), "N/A", "Not Calculated", True, 0
     if not all([processed_df is not None, not processed_df.empty, ordered_stages, ts_col_map,
@@ -794,7 +794,7 @@ def calculate_ai_forecast_core(
     latest_permissible_generation_month = current_goal_lpi_month_period - avg_lag_months_approx
     earliest_permissible_generation_month = proj_start_month_period
 
-    valid_generation_months_for_planning = pd.period_range( # RENAMED
+    valid_generation_months_for_planning = pd.period_range( 
         start=max(earliest_permissible_generation_month, projection_calc_months.min()),
         end=min(latest_permissible_generation_month, projection_calc_months.max())
     )
@@ -817,7 +817,7 @@ def calculate_ai_forecast_core(
     if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
 
-    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'): # Ensure Streamlit context for sidebar
+    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'): 
         st.sidebar.subheader("Debug Info (Primary Run - Before Planning Loop)")
         st.sidebar.markdown(f"**Goal LPI (orig):** `{goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}`")
         st.sidebar.markdown(f"**Goal ICFs:** `{current_goal_icf_number}`")
@@ -1104,10 +1104,13 @@ def calculate_ai_forecast_core(
             ai_results_df_final_display = ai_results_df.loc[proj_start_month_period:display_end_month_final].copy()
         except Exception: pass
     
-    if run_mode == "primary" and 'st' in globals() and hasattr(st, 'session_state'): 
-        st.session_state.ai_gen_df_debug_primary = ai_gen_df.copy()
-        st.session_state.ai_results_df_debug_primary = ai_results_df.copy()
-
+    if 'st' in globals() and hasattr(st, 'session_state'): 
+        if run_mode == "primary":
+            st.session_state.ai_gen_df_debug_primary = ai_gen_df.copy()
+            st.session_state.ai_results_df_debug_primary = ai_results_df.copy()
+        elif run_mode == "best_case_extended_lpi":
+            st.session_state.ai_gen_df_debug_best_case = ai_gen_df.copy()
+            st.session_state.ai_results_df_debug_best_case = ai_results_df.copy()
 
     return ai_results_df_final_display, ai_site_proj_df, ads_off_date_str_calc, feasibility_msg_final_display, is_unfeasible_this_run, final_achieved_icfs_landed_run
 # --- END OF AI FORECAST CORE FUNCTION ---
@@ -1248,10 +1251,10 @@ with st.sidebar:
             help="Inflation applies for every X% increase in monthly QLs over historical baseline."
         )
         ai_monthly_ql_capacity_multiplier_sidebar_val = st.slider( 
-            "AI: Monthly QL Capacity Multiplier", # RENAMED LABEL
-            min_value=1.0, max_value=30.0, value=ai_monthly_ql_capacity_multiplier_sidebar_val, step=0.5, # Use variable for default
-            key="ai_monthly_ql_cap_mult_v1", # New key
-            help="Multiplier for baseline QLs a single month will attempt to handle during AI forecast planning. Higher values allow more QLs per month if needed by the timeline." # UPDATED HELP
+            "AI: Monthly QL Capacity Multiplier", 
+            min_value=1.0, max_value=30.0, value=ai_monthly_ql_capacity_multiplier_sidebar_val, step=0.5, 
+            key="ai_monthly_ql_cap_mult_v1", 
+            help="Multiplier for baseline QLs a single month will attempt to handle during AI forecast planning. Higher values allow more QLs per month if needed by the timeline."
         )
 
 
@@ -1518,6 +1521,10 @@ if st.session_state.data_processed_successfully:
 
         if st.button("🚀 Generate AI Forecast", key="run_ai_forecast_v5"): 
             st.session_state.ai_forecast_results = None 
+            if 'ai_gen_df_debug_primary' in st.session_state: del st.session_state.ai_gen_df_debug_primary
+            if 'ai_results_df_debug_primary' in st.session_state: del st.session_state.ai_results_df_debug_primary
+            if 'ai_gen_df_debug_best_case' in st.session_state: del st.session_state.ai_gen_df_debug_best_case
+            if 'ai_results_df_debug_best_case' in st.session_state: del st.session_state.ai_results_df_debug_best_case
 
             if selected_rate_method_label_ai_tab == "Manual Input Below":
                 ai_effective_rates = ai_manual_conv_rates_tab_input_val
@@ -1559,6 +1566,23 @@ if st.session_state.data_processed_successfully:
                     run_mode=run_mode_for_call_primary,
                     ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val 
                 )
+                
+                if 'st' in globals() and hasattr(st, 'sidebar'):
+                    st.sidebar.subheader("Debug: Primary Run Results")
+                    st.sidebar.markdown(f"**Message (Primary):** `{ai_message_run1}`")
+                    st.sidebar.markdown(f"**Unfeasible (Primary):** `{ai_unfeasible_run1}`")
+                    st.sidebar.markdown(f"**Actual ICFs (Primary):** `{ai_actual_icfs_run1:.1f}`")
+                    if 'ai_gen_df_debug_primary' in st.session_state and st.session_state.ai_gen_df_debug_primary is not None:
+                        st.sidebar.write("Primary Run ai_gen_df (Gen Plan):")
+                        display_debug_gen_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
+                        display_debug_gen_df.index = display_debug_gen_df.index.strftime('%Y-%m')
+                        st.sidebar.dataframe(display_debug_gen_df)
+                    if 'ai_results_df_debug_primary' in st.session_state and st.session_state.ai_results_df_debug_primary is not None: 
+                        st.sidebar.write("Primary Run ai_results_df (Landing Plan):")
+                        display_debug_results_df = st.session_state.ai_results_df_debug_primary[['Projected_ICF_Landed', 'Cumulative_ICF_Landed']].copy()
+                        display_debug_results_df.index = display_debug_results_df.index.strftime('%Y-%m')
+                        st.sidebar.dataframe(display_debug_results_df)
+                
                 st.session_state.ai_forecast_results = {
                     'df': ai_results_df_run1, 'site_df': ai_site_df_run1, 'ads_off': ai_ads_off_run1,
                     'message': ai_message_run1, 'unfeasible': ai_unfeasible_run1, 'actual_icfs': ai_actual_icfs_run1,
@@ -1581,6 +1605,23 @@ if st.session_state.data_processed_successfully:
                         run_mode=run_mode_for_call_best_case,
                         ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val 
                     )
+
+                    if 'st' in globals() and hasattr(st, 'sidebar'):
+                        st.sidebar.subheader("Debug: Best Case Run Results")
+                        st.sidebar.markdown(f"**Message (Best Case):** `{ai_message_run2}`")
+                        st.sidebar.markdown(f"**Unfeasible (Best Case):** `{ai_unfeasible_run2}`") 
+                        st.sidebar.markdown(f"**Actual ICFs (Best Case):** `{ai_actual_icfs_run2:.1f}`")
+                        if 'ai_gen_df_debug_best_case' in st.session_state and st.session_state.ai_gen_df_debug_best_case is not None:
+                            st.sidebar.write("Best Case Run ai_gen_df (Gen Plan):")
+                            display_debug_gen_df_bc = st.session_state.ai_gen_df_debug_best_case[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
+                            display_debug_gen_df_bc.index = display_debug_gen_df_bc.index.strftime('%Y-%m')
+                            st.sidebar.dataframe(display_debug_gen_df_bc)
+                        if 'ai_results_df_debug_best_case' in st.session_state and st.session_state.ai_results_df_debug_best_case is not None: 
+                            st.sidebar.write("Best Case Run ai_results_df (Landing Plan):")
+                            display_debug_results_df_bc = st.session_state.ai_results_df_debug_best_case[['Projected_ICF_Landed', 'Cumulative_ICF_Landed']].copy()
+                            display_debug_results_df_bc.index = display_debug_results_df_bc.index.strftime('%Y-%m')
+                            st.sidebar.dataframe(display_debug_results_df_bc)
+                    
                     st.session_state.ai_forecast_results = {
                         'df': ai_results_df_run2, 'site_df': ai_site_df_run2, 'ads_off': ai_ads_off_run2,
                         'message': ai_message_run2, 'unfeasible': ai_unfeasible_run2, 'actual_icfs': ai_actual_icfs_run2,
@@ -1601,25 +1642,6 @@ if st.session_state.data_processed_successfully:
                  st.success(f"Best Case Scenario Forecast Status: {ai_message}")
             elif ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
             else: st.success(f"Forecast Status: {ai_message}")
-
-            if results.get('run_mode_displayed') == "primary" and 'st' in globals() and hasattr(st, 'session_state'):
-                if 'ai_gen_df_debug_primary' in st.session_state and st.session_state.ai_gen_df_debug_primary is not None:
-                    st.sidebar.subheader("Debug Info (Primary Run - After Calc)")
-                    st.sidebar.markdown(f"**Message:** `{results['message']}`")
-                    st.sidebar.markdown(f"**Unfeasible:** `{results['unfeasible']}`")
-                    st.sidebar.markdown(f"**Actual ICFs Achieved (Primary):** `{results['actual_icfs']:.1f}`")
-                    st.sidebar.write("Primary Run ai_gen_df (Gen Plan):")
-                    display_debug_gen_df = st.session_state.ai_gen_df_debug_primary[['Required_QLs_POF_Final', 'Generated_ICF_Mean', 'Unallocatable_QLs', 'Implied_Ad_Spend']].copy()
-                    display_debug_gen_df.index = display_debug_gen_df.index.strftime('%Y-%m')
-                    st.sidebar.dataframe(display_debug_gen_df)
-                    if 'ai_gen_df_debug_primary' in st.session_state: del st.session_state.ai_gen_df_debug_primary 
-
-                if 'ai_results_df_debug_primary' in st.session_state and st.session_state.ai_results_df_debug_primary is not None: 
-                    st.sidebar.write("Primary Run ai_results_df (Landing Plan):")
-                    display_debug_results_df = st.session_state.ai_results_df_debug_primary[['Projected_ICF_Landed', 'Cumulative_ICF_Landed']].copy()
-                    display_debug_results_df.index = display_debug_results_df.index.strftime('%Y-%m')
-                    st.sidebar.dataframe(display_debug_results_df)
-                    if 'ai_results_df_debug_primary' in st.session_state: del st.session_state.ai_results_df_debug_primary
             
             ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
             ai_col1_res.metric("Target LPI Date (Original Goal)", ai_goal_lpi_date.strftime("%Y-%m-%d")) 
