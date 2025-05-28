@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import math # Added for math.floor if we use it later, good to have
+import math # Added for math.ceil
 import re
 from datetime import datetime, timedelta
 import io
@@ -882,11 +882,21 @@ def calculate_ai_forecast_core(
                 st.sidebar.markdown(f"  `qls_theoretically_needed_for_remaining`: {qls_theoretically_needed_for_remaining:.2f}")
                 st.sidebar.markdown(f"  `monthly_ql_capacity_target_heuristic`: {monthly_ql_capacity_target_heuristic:.2f}")
 
-            current_month_initial_ql_target = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
-            current_month_initial_ql_target = round(max(0, current_month_initial_ql_target))
+            # Determine QL target for the month
+            ql_target_before_round = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
+            
+            # If this is the last bit needed and it's small but positive, ensure we round up to at least 1 QL.
+            # This helps to fully "complete" the goal if only a fraction of a QL is technically needed.
+            if qls_theoretically_needed_for_remaining > 0 and qls_theoretically_needed_for_remaining < 1.0 and \
+               ql_target_before_round == qls_theoretically_needed_for_remaining : # Check if it's the limiting factor
+                current_month_initial_ql_target = math.ceil(max(0, ql_target_before_round))
+            else:
+                current_month_initial_ql_target = round(max(0, ql_target_before_round))
+
 
             if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
-                st.sidebar.markdown(f"  `current_month_initial_ql_target` (after min & round): {current_month_initial_ql_target}")
+                st.sidebar.markdown(f"  `ql_target_before_round`: {ql_target_before_round:.2f}")
+                st.sidebar.markdown(f"  `current_month_initial_ql_target` (after min & specific round): {current_month_initial_ql_target}")
 
             ai_gen_df.loc[gen_month, 'Required_QLs_POF_Initial'] = current_month_initial_ql_target
             site_ql_allocations_month_specific = {site: 0 for site in all_sites_list_ai}
@@ -1094,7 +1104,7 @@ def calculate_ai_forecast_core(
     
     is_unfeasible_this_run = not goal_met_on_time_this_run or \
                              total_unallocated_qls_run > 0 or \
-                             icfs_still_to_assign_globally > 1e-5 # MODIFIED epsilon
+                             icfs_still_to_assign_globally > 1e-5 # MODIFIED: More tolerant epsilon for remaining ICFs
 
     feasibility_msg_final_display = ""
     unallocated_ql_msg = f" {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps." if total_unallocated_qls_run > 0 else ""
@@ -1122,7 +1132,7 @@ def calculate_ai_forecast_core(
     display_end_month_final = projection_calc_months[-1] if not projection_calc_months.empty else proj_start_month_period
     if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df:
         met_goal_series_trim = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= (current_goal_icf_number - 1e-9)] # MODIFIED
-        if not met_goal_series_trim.empty: # Corrected variable name
+        if not met_goal_series_trim.empty: 
             lpi_achieved_month_for_trim_val = met_goal_series_trim.index.min()
             try:
                 candidate_end_month_val_ts = lpi_achieved_month_for_trim_val.to_timestamp() + pd.offsets.MonthEnd(3)
@@ -1148,7 +1158,6 @@ def calculate_ai_forecast_core(
 # --- END OF AI FORECAST CORE FUNCTION ---
 
 # --- Streamlit UI ---
-# ... (Session state initializations remain the same) ...
 if 'data_processed_successfully' not in st.session_state: st.session_state.data_processed_successfully = False
 if 'referral_data_processed' not in st.session_state: st.session_state.referral_data_processed = None
 if 'funnel_definition' not in st.session_state: st.session_state.funnel_definition = None
@@ -1168,7 +1177,7 @@ use_rolling_flag_sidebar = False; rolling_window_months_sidebar = 3; goal_icf_co
 proj_icf_variation_percent_sidebar = 10
 ai_cpql_inflation_factor_sidebar = 0.0 
 ai_ql_volume_threshold_sidebar = 10.0 
-ai_monthly_ql_capacity_multiplier_sidebar_val = 3.0
+ai_monthly_ql_capacity_multiplier_sidebar_val = 3.0 
 
 with st.sidebar:
     st.header("⚙️ Setup")
