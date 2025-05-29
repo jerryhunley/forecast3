@@ -882,18 +882,18 @@ def calculate_ai_forecast_core(
             #     st.sidebar.markdown(f"  `qls_theoretically_needed_for_remaining`: {qls_theoretically_needed_for_remaining:.2f}")
             #     st.sidebar.markdown(f"  `monthly_ql_capacity_target_heuristic`: {monthly_ql_capacity_target_heuristic:.2f}")
 
-            ql_target_before_round = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
+            ql_target_potential = min(qls_theoretically_needed_for_remaining, monthly_ql_capacity_target_heuristic)
             
-            if qls_theoretically_needed_for_remaining > 0 and qls_theoretically_needed_for_remaining < 1.0 and \
-               ql_target_before_round == qls_theoretically_needed_for_remaining : 
-                current_month_initial_ql_target = math.ceil(max(0, ql_target_before_round))
-            else:
-                current_month_initial_ql_target = round(max(0, ql_target_before_round))
-
+            # REFINED ROUNDING for the QL target for the current month
+            if ql_target_potential > 0 and ql_target_potential < 1.0: # If it's a positive fraction (e.g. 0.46 QLs needed)
+                current_month_initial_ql_target = math.ceil(ql_target_potential) # Round up to 1 QL
+            else: # If it's >= 1.0 or 0
+                current_month_initial_ql_target = round(max(0, ql_target_potential)) # Standard rounding (X.5 to nearest even)
 
             # if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
-            #     st.sidebar.markdown(f"  `ql_target_before_round`: {ql_target_before_round:.2f}")
+            #     st.sidebar.markdown(f"  `ql_target_potential` (before specific round): {ql_target_potential:.2f}") # Changed from ql_target_before_round
             #     st.sidebar.markdown(f"  `current_month_initial_ql_target` (after min & specific round): {current_month_initial_ql_target}")
+
 
             ai_gen_df.loc[gen_month, 'Required_QLs_POF_Initial'] = current_month_initial_ql_target
             site_ql_allocations_month_specific = {site: 0 for site in all_sites_list_ai}
@@ -1093,35 +1093,38 @@ def calculate_ai_forecast_core(
     actual_lpi_month_achieved_this_run = current_goal_lpi_month_period 
 
     if not ai_results_df.empty and 'Cumulative_ICF_Landed' in ai_results_df: 
-        met_goal_series = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= (current_goal_icf_number - 1e-9)] 
+        met_goal_series = ai_results_df[ai_results_df['Cumulative_ICF_Landed'] >= (current_goal_icf_number - 1e-9)] # MODIFIED EPSILON
         if not met_goal_series.empty:
             actual_lpi_month_achieved_this_run = met_goal_series.index.min()
             if actual_lpi_month_achieved_this_run <= current_goal_lpi_month_period : 
                  goal_met_on_time_this_run = True
     
+    # REFINED is_unfeasible_this_run condition
+    significant_icfs_still_to_assign = icfs_still_to_assign_globally > 0.5 # More than half an ICF is truly unplanned
     is_unfeasible_this_run = not goal_met_on_time_this_run or \
                              total_unallocated_qls_run > 0 or \
-                             icfs_still_to_assign_globally > 1e-5 
+                             significant_icfs_still_to_assign
 
     feasibility_msg_final_display = ""
     unallocated_ql_msg = f" {total_unallocated_qls_run:.0f} QLs were unallocatable due to site caps." if total_unallocated_qls_run > 0 else ""
-    remaining_icfs_msg = f" Additionally, {icfs_still_to_assign_globally:.1f} ICFs could not be planned due to generation capacity constraints or timeline." if icfs_still_to_assign_globally > 1e-5 else "" 
+    # Adjusted remaining_icfs_msg to use the significant_icfs_still_to_assign threshold for clarity
+    remaining_icfs_msg = f" Additionally, {icfs_still_to_assign_globally:.1f} ICFs could not be planned due to generation capacity constraints or timeline." if significant_icfs_still_to_assign else ""
     
     if run_mode == "primary":
         if not is_unfeasible_this_run:
             feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear ACHIEVABLE."
         else:
             feasibility_msg_final_display = f"AI Projection: Original goals ({goal_icf_number_orig} ICFs by {goal_lpi_date_dt_orig.strftime('%Y-%m-%d')}) appear UNFEASIBLE."
-            if not goal_met_on_time_this_run and not (icfs_still_to_assign_globally > 1e-5 and final_achieved_icfs_landed_run == 0) :  
+            if not goal_met_on_time_this_run and not (significant_icfs_still_to_assign and final_achieved_icfs_landed_run == 0) :  
                  achieved_by_date_str = actual_lpi_month_achieved_this_run.strftime('%Y-%m') if final_achieved_icfs_landed_run > 0 and pd.notna(actual_lpi_month_achieved_this_run) else 'end of projection'
                  feasibility_msg_final_display += f" LPI not met on time (Achieved {final_achieved_icfs_landed_run:.0f} by {achieved_by_date_str})."
         feasibility_msg_final_display += unallocated_ql_msg + remaining_icfs_msg
             
     elif run_mode == "best_case_extended_lpi":
         feasibility_msg_final_display = f"Original goal was unfeasible. Best Case Scenario (LPI extended to {current_goal_lpi_month_period.strftime('%Y-%m')} based on max horizon of {projection_horizon_months} months): "
-        if goal_met_on_time_this_run:
+        if goal_met_on_time_this_run: # goal_met_on_time_this_run is now relative to the extended LPI
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs achieved by {actual_lpi_month_achieved_this_run.strftime('%Y-%m')}."
-        else:
+        else: # Not met even by extended LPI
             achieved_by_date_str = actual_lpi_month_achieved_this_run.strftime('%Y-%m') if final_achieved_icfs_landed_run > 0 and pd.notna(actual_lpi_month_achieved_this_run) else 'end of extended projection'
             feasibility_msg_final_display += f"Target of {current_goal_icf_number} ICFs NOT achieved. Achieved {final_achieved_icfs_landed_run:.0f} ICFs by {achieved_by_date_str}."
         feasibility_msg_final_display += unallocated_ql_msg + remaining_icfs_msg
@@ -1604,8 +1607,9 @@ if st.session_state.data_processed_successfully:
                     ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val 
                 )
                 
-                if 'st' in globals() and hasattr(st, 'sidebar'): # Ensure Streamlit context for sidebar operations
-                    st.sidebar.subheader("Debug: Primary Run Results")
+                if 'st' in globals() and hasattr(st, 'sidebar'):
+                    # This block is for displaying debug immediately after primary run
+                    st.sidebar.subheader("Debug: Primary Run After-Calc") 
                     st.sidebar.markdown(f"**Message (Primary):** `{ai_message_run1}`")
                     st.sidebar.markdown(f"**Unfeasible (Primary):** `{ai_unfeasible_run1}`")
                     st.sidebar.markdown(f"**Actual ICFs (Primary):** `{ai_actual_icfs_run1:.1f}`")
@@ -1643,8 +1647,8 @@ if st.session_state.data_processed_successfully:
                         ai_monthly_ql_capacity_multiplier=ai_monthly_ql_capacity_multiplier_sidebar_val 
                     )
 
-                    if 'st' in globals() and hasattr(st, 'sidebar'): # Ensure Streamlit context
-                        st.sidebar.subheader("Debug: Best Case Run Results")
+                    if 'st' in globals() and hasattr(st, 'sidebar'):
+                        st.sidebar.subheader("Debug: Best Case Run After-Calc")
                         st.sidebar.markdown(f"**Message (Best Case):** `{ai_message_run2}`")
                         st.sidebar.markdown(f"**Unfeasible (Best Case):** `{ai_unfeasible_run2}`") 
                         st.sidebar.markdown(f"**Actual ICFs (Best Case):** `{ai_actual_icfs_run2:.1f}`")
@@ -1679,8 +1683,6 @@ if st.session_state.data_processed_successfully:
                  st.success(f"Best Case Scenario Forecast Status: {ai_message}")
             elif ai_unfeasible: st.warning(f"Feasibility Note: {ai_message}")
             else: st.success(f"Forecast Status: {ai_message}")
-            
-            # The old debug block that was here has been removed, as debug info is shown immediately after runs.
             
             ai_col1_res, ai_col2_res, ai_col3_res = st.columns(3)
             ai_col1_res.metric("Target LPI Date (Original Goal)", ai_goal_lpi_date.strftime("%Y-%m-%d")) 
