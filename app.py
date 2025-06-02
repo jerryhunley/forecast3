@@ -1070,6 +1070,8 @@ def calculate_ai_forecast_core(
     # --- CONTINUATION OF calculate_ai_forecast_core ---
     # --- CPQL Inflation, ICF Landing, Ads Off Date, Site Projections, Feasibility (per scenario) ---
 
+    all_unfeasible_flags = {}
+    all_actual_icfs_landed = {}
     for scenario_name, ai_gen_df_scen in all_results_gen_df.items():
         # CPQL Inflation and Implied Ad Spend Calculation (per scenario)
         current_total_unallocated_qls_scen_run = 0 # Reset for this loop, as it's already stored from gen phase
