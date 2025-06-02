@@ -1920,7 +1920,8 @@ if st.session_state.data_processed_successfully:
                                      else (f"${row_cpicf['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row_cpicf['Projected_CPICF_Cohort_Source_Mean']) else "-"))
                                     if proj_icf_variation_percent_sidebar > 0 else (f"${row_cpicf['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row_cpicf['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
                     cols_to_show_ai_res_list.append('Projected CPICF (Low-Mean-High)')
-               elif 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df_res_fmt.columns:
+                # --- CONTINUATION OF THE AI TAB DISPLAY LOGIC ---
+                elif 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df_res_fmt.columns:
                      ai_display_df_res_fmt.rename(columns={'Projected_CPICF_Cohort_Source_Mean':'Projected CPICF (Mean)'}, inplace=True)
                      ai_display_df_res_fmt['Projected CPICF (Mean)'] = ai_display_df_res_fmt['Projected CPICF (Mean)'].apply(lambda x_cpicf: f"${x_cpicf:,.2f}" if pd.notna(x_cpicf) else '-')
                      cols_to_show_ai_res_list.append('Projected CPICF (Mean)')
@@ -1969,3 +1970,4 @@ if st.session_state.data_processed_successfully:
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
+               
