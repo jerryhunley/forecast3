@@ -486,7 +486,8 @@ def score_performance_groups(_performance_metrics_df, weights, group_col_name="G
 def score_sites(_site_metrics_df, weights):
     # The _site_metrics_df from calculate_site_metrics should have 'Site' as a column
     # It's better if calculate_site_metrics ensures 'Site' is the group_col_name passed to score_performance_groups
-    return score_performance_groups(_site_metrics_df, weights, group_col_name="Site")
+# app.py (Continuation from Part 1)
+
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map,
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
                                           inter_stage_lags_for_maturity,
