@@ -226,16 +226,24 @@ def calculate_overall_inter_stage_lags(_processed_df, ordered_stages, ts_col_map
             inter_stage_lags[f"{stage_from} -> {stage_to}"] = np.nan
     return inter_stage_lags
 
-# This is the original calculate_site_metrics function
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns:
+        st.warning("Site column not found or data is empty. Cannot calculate site metrics.")
         return pd.DataFrame()
-    # It now primarily calls the generic function
-    return calculate_grouped_performance_metrics(
+    # Call the generic function with "Site" as the grouping column
+    site_metrics_df = calculate_grouped_performance_metrics(
         _processed_df, ordered_stages, ts_col_map,
-        grouping_cols=["Site"], # Specific grouping for sites
-        unclassified_label="Unassigned Site" # Specific label for sites
+        grouping_cols=["Site"],
+        unclassified_label="Unassigned Site"
     )
+    # Rename the generic "Projection Lag (Days)" to "Site Projection Lag (Days)" for backward compatibility with scoring weights
+    if "Projection Lag (Days)" in site_metrics_df.columns:
+        site_metrics_df.rename(columns={"Projection Lag (Days)": "Site Projection Lag (Days)"}, inplace=True)
+    if "Screen Fail % (from ICF)" in site_metrics_df.columns: # Also ensure original site screen fail name for weights
+        site_metrics_df.rename(columns={"Screen Fail % (from ICF)": "Site Screen Fail %"}, inplace=True)
+
+    return site_metrics_df
+
 
 # NEW: Generic function for calculating performance metrics based on grouping columns
 def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_map, grouping_cols: list, unclassified_label="Unclassified"):
@@ -244,28 +252,32 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
 
     processed_df_copy = _processed_df.copy()
     
-    # Ensure all grouping columns exist and create a single grouping key
-    actual_grouping_key_col_name = "" # This will be the name of the column to group by and then set as index for scoring
+    # Define the actual column name that will be used for grouping and later as the index for scoring
+    actual_grouping_key_col_name = "" 
     
     if len(grouping_cols) == 1:
         gc_single = grouping_cols[0]
         if gc_single not in processed_df_copy.columns:
-            st.warning(f"Grouping column '{gc_single}' not found. Results for this grouping might be empty or based on '{unclassified_label}'.")
+            # If the primary grouping column (like "Site" or "UTM Source") is missing, create it and fill with unclassified.
+            # This allows the function to proceed and group everything under "Unclassified".
+            st.warning(f"Grouping column '{gc_single}' not found. All data for this group will be '{unclassified_label}'.")
             processed_df_copy[gc_single] = unclassified_label 
-        processed_df_copy[f"{gc_single}_Cleaned"] = processed_df_copy[gc_single].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
-        actual_grouping_key_col_name = f"{gc_single}_Cleaned" # Store the name of the cleaned column
+        
+        # Always create a cleaned version to ensure consistency for groupby and later for the index name
+        actual_grouping_key_col_name = f"{gc_single}_Cleaned" # This will be the actual column to group by
+        processed_df_copy[actual_grouping_key_col_name] = processed_df_copy[gc_single].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
+
     elif len(grouping_cols) > 1:
-        actual_grouping_key_col_name = "Combined_Group_Key" # Name for the combined key column
+        actual_grouping_key_col_name = "Combined_Ad_Group" # Name for the combined key column
         temp_clean_cols_for_join = []
         for i, gc_item in enumerate(grouping_cols):
             if gc_item not in processed_df_copy.columns:
-                st.warning(f"Grouping column '{gc_item}' not found. Results for this grouping might be empty or based on '{unclassified_label}'.")
-                processed_df_copy[gc_item] = unclassified_label
+                st.warning(f"Grouping column '{gc_item}' not found. It will be treated as '{unclassified_label}' in combinations.")
+                processed_df_copy[gc_item] = unclassified_label # Create with unclassified if missing
             temp_col_name = f"_temp_clean_join_{i}" # Temporary column name
             processed_df_copy[temp_col_name] = processed_df_copy[gc_item].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
             temp_clean_cols_for_join.append(temp_col_name)
         processed_df_copy[actual_grouping_key_col_name] = processed_df_copy[temp_clean_cols_for_join].apply(lambda x: " / ".join(x), axis=1)
-        # processed_df_copy.drop(columns=temp_clean_cols_for_join, inplace=True, errors='ignore') # Optional cleanup
     else:
         st.error("No grouping columns provided for performance metrics calculation.")
         return pd.DataFrame()
@@ -290,16 +302,13 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
         (STAGE_SENT_TO_SITE, STAGE_APPOINTMENT_SCHEDULED),
         (STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF)
     ]
-    # For Ad Performance, TTC and Funnel Movement might be less relevant or need different logic.
-    # These constants are kept for structural similarity but their use is conditional/omitted for Ad Performance.
-    site_contact_attempt_statuses = ["Site Contact Attempt 1"]
+    site_contact_attempt_statuses = ["Site Contact Attempt 1"] 
     post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED]
-
 
     try:
         grouped_data = processed_df_copy.groupby(actual_grouping_key_col_name)
         for group_name_val, group_df in grouped_data:
-            metrics = {actual_grouping_key_col_name: group_name_val} # This will be the column for group labels
+            metrics = {actual_grouping_key_col_name: group_name_val} 
             
             count_pof = group_df[ts_pof_col].notna().sum() if ts_pof_col and ts_pof_col in group_df else 0
             count_psa = group_df[ts_psa_col].notna().sum() if ts_psa_col and ts_psa_col in group_df else 0
@@ -326,14 +335,11 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
                 else: group_total_projection_lag = np.nan; break
             if valid_lag_segments_group < len(projection_segments_for_lag_path): group_total_projection_lag = np.nan
             
-            # Use a generic name for the lag column that score_performance_groups can use
-            # If this function is called for "Site" grouping, "Site Projection Lag (Days)" is one of the weight keys.
-            # If for ads, "Projection Lag (Days)" would be the key.
-            if grouping_cols == ["Site"]: # Specific handling for original site metrics
+            # Assign lag metric based on original grouping intention
+            if grouping_cols == ["Site"]:
                  metrics['Site Projection Lag (Days)'] = group_total_projection_lag
-                 # Also calculate original Site Screen Fail % for sites if needed for weights
-                 metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0
-                 # TTC and Funnel Movement for Sites
+                 metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0 # Specific for sites
+                 # Calculate TTC and Funnel Movement specifically for Sites
                  ttc_times_group = []; funnel_movement_steps_group = []
                  parsed_status_col_name = f"Parsed_Lead_Status_History"; parsed_stage_col_name = f"Parsed_Lead_Stage_History"
                  sent_to_site_group_df = group_df.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group_df else pd.DataFrame()
@@ -360,41 +366,48 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
             else: # For Ad groupings (UTM Source, etc.)
                  metrics['Projection Lag (Days)'] = group_total_projection_lag
                  metrics['Screen Fail % (from ICF)'] = (count_sf / count_icf) if count_icf > 0 else 0.0
-                 metrics['Avg TTC (Days)'] = np.nan # Not applicable or defined for ads
-                 metrics['Avg Funnel Movement Steps'] = 0.0 # Not applicable or defined for ads
-
+                 metrics['Avg TTC (Days)'] = np.nan 
+                 metrics['Avg Funnel Movement Steps'] = 0.0
 
             metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag_generic(group_df, ts_pof_col, ts_icf_col) if ts_pof_col and ts_icf_col else np.nan
             performance_metrics_list.append(metrics)
 
         performance_df_final = pd.DataFrame(performance_metrics_list)
-        # Rename the grouping key column to match the original first grouping col name for better display if it was a single column
+        
+        # Rename the temporary grouping key column to the first original grouping col name for better display if it was a single column.
+        # This is important for `score_performance_groups` to find the column if it's called with the original name.
         if len(grouping_cols) == 1 and actual_grouping_key_col_name != grouping_cols[0]:
             performance_df_final.rename(columns={actual_grouping_key_col_name: grouping_cols[0]}, inplace=True)
+        elif len(grouping_cols) > 1 and actual_grouping_key_col_name != "Combined_Ad_Group": # Should be "Combined_Ad_Group"
+            # If it wasn't, this implies an issue, but we'll rename for consistency if calculate_grouped_performance_metrics used a different key
+            performance_df_final.rename(columns={actual_grouping_key_col_name: "Combined_Ad_Group"}, inplace=True)
+
 
         return performance_df_final
     except Exception as e:
-        st.error(f"Error calculating grouped performance metrics: {e}"); st.exception(e)
+        st.error(f"Error calculating grouped performance metrics for '{grouping_cols}': {e}"); st.exception(e)
         return pd.DataFrame()
 
 # MODIFIED: Renamed score_sites to score_performance_groups and generalized
-def score_performance_groups(_performance_metrics_df, weights, group_col_name="Group_Key_Temp"): # group_col_name is the name of the column to set as index
+def score_performance_groups(_performance_metrics_df, weights, group_col_name="Group_Key_Temp"):
     if _performance_metrics_df is None or _performance_metrics_df.empty: return pd.DataFrame()
     try:
         performance_metrics_df = _performance_metrics_df.copy()
         
-        # Ensure the group_col_name (which will become the index) exists
+        # Check if the specified group_col_name exists. If not, try to infer it.
         if group_col_name not in performance_metrics_df.columns:
-            # Try to find a suitable default if the exact temp key isn't there (e.g. if renamed before call)
-            if "Site" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp": # Special case for original site_metrics call
+            # Attempt to find a suitable default if the exact temp key isn't there
+            if "Site" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp": 
                 group_col_name = "Site"
-            elif "UTM Source" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp":
+            elif "UTM Source" in performance_metrics_df.columns and ("UTM Source_Cleaned" not in performance_metrics_df.columns) and group_col_name == "Group_Key_Temp":
                 group_col_name = "UTM Source"
-            elif "UTM Source / Medium" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp":
-                 group_col_name = "UTM Source / Medium"
+            elif "UTM Source_Cleaned" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp": # If cleaned version is passed
+                 group_col_name = "UTM Source_Cleaned"
+            elif "Combined_Ad_Group" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp":
+                 group_col_name = "Combined_Ad_Group"
             else:
                 st.error(f"Scoring: Grouping column '{group_col_name}' missing from metrics DataFrame. Available: {performance_metrics_df.columns.tolist()}");
-                return _performance_metrics_df # Return original if error
+                return _performance_metrics_df 
 
         performance_metrics_df[group_col_name] = performance_metrics_df[group_col_name].fillna("Unknown Group")
         if performance_metrics_df[group_col_name].duplicated().any():
@@ -403,7 +416,6 @@ def score_performance_groups(_performance_metrics_df, weights, group_col_name="G
         performance_metrics_df_indexed = performance_metrics_df.set_index(group_col_name)
 
         metrics_to_scale = list(weights.keys())
-        # Updated lower_is_better to reflect potentially generic names and specific site names
         lower_is_better = ["Avg TTC (Days)", "Screen Fail % (from ICF)", "Site Screen Fail %", 
                            "Lag Qual -> ICF (Days)", "Projection Lag (Days)", "Site Projection Lag (Days)"]
 
@@ -437,14 +449,12 @@ def score_performance_groups(_performance_metrics_df, weights, group_col_name="G
 
         performance_metrics_df_indexed['Score_Raw'] = 0.0; total_weight_applied = 0.0
         for metric, weight_value in weights.items():
-             if metric in scaled_metrics_display.columns: # Check if the weight's metric exists as a scaled column
+             if metric in scaled_metrics_display.columns: 
                  current_scaled_metric_series = scaled_metrics_display.get(metric)
                  if current_scaled_metric_series is not None:
                      performance_metrics_df_indexed['Score_Raw'] += current_scaled_metric_series.fillna(0.5) * weight_value
                  else: performance_metrics_df_indexed['Score_Raw'] += 0.5 * weight_value
                  total_weight_applied += abs(weight_value)
-             # else: st.sidebar.warning(f"Weight metric '{metric}' not found in scaled data for scoring. Skipping.")
-
 
         if total_weight_applied > 0: performance_metrics_df_indexed['Score'] = (performance_metrics_df_indexed['Score_Raw'] / total_weight_applied) * 100
         else: performance_metrics_df_indexed['Score'] = 0.0
@@ -460,14 +470,22 @@ def score_performance_groups(_performance_metrics_df, weights, group_col_name="G
                  def assign_grade_fallback(score_value):
                      if pd.isna(score_value): return 'N/A'
                      score_value = round(score_value)
-                     if score_value >= 90: return 'A'; elif score_value >= 80: return 'B'; elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'; else: return 'F'
+                     if score_value >= 90: return 'A' # Corrected elif
+                     elif score_value >= 80: return 'B'
+                     elif score_value >= 70: return 'C'
+                     elif score_value >= 60: return 'D'
+                     else: return 'F'
                  performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Score'].apply(assign_grade_fallback)
             performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A')
         elif len(performance_metrics_df_indexed) == 1:
             def assign_single_group_grade(score_value):
                 if pd.isna(score_value): return 'N/A'
                 score_value = round(score_value)
-                if score_value >= 90: return 'A'; elif score_value >= 80: return 'B'; elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'; else: return 'F'
+                if score_value >= 90: return 'A' # Corrected elif
+                elif score_value >= 80: return 'B'
+                elif score_value >= 70: return 'C'
+                elif score_value >= 60: return 'D'
+                else: return 'F'
             performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Score'].apply(assign_single_group_grade)
         else: performance_metrics_df_indexed['Grade'] = None
 
@@ -482,11 +500,10 @@ def score_performance_groups(_performance_metrics_df, weights, group_col_name="G
              return _performance_metrics_df
         return pd.DataFrame()
 
-# score_sites will now call the generic function for backward compatibility if needed, or can be phased out.
 def score_sites(_site_metrics_df, weights):
-    # The _site_metrics_df from calculate_site_metrics should have 'Site' as a column
-    # It's better if calculate_site_metrics ensures 'Site' is the group_col_name passed to score_performance_groups
-# app.py (Continuation from Part 1)
+    # calculate_site_metrics now returns a df with 'Site' as the first column (the cleaned group key)
+    # so we directly pass "Site" as the group_col_name.
+    return score_performance_groups(_site_metrics_df, weights, group_col_name="Site")
 
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map,
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
