@@ -475,6 +475,8 @@ def score_sites(_site_metrics_df, weights):
     # calculate_site_metrics ensures the grouping column is named "Site"
     return score_performance_groups(_site_metrics_df, weights, group_col_name="Site")
 
+# app.py (Continuation of Part 1 - which includes corrected calculate_grouped_performance_metrics and score_performance_groups)
+
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map,
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
                                           inter_stage_lags_for_maturity,
@@ -1006,7 +1008,6 @@ def calculate_ai_forecast_core(
         for gen_month in valid_generation_months_for_planning:
             if icfs_still_to_assign_globally <= 1e-9: break
 
-            # --- Determine active sites for this generation month ---
             active_sites_this_gen_month = []
             if all_defined_sites.size > 0:
                 for site_name_iter in all_defined_sites:
@@ -1378,19 +1379,22 @@ with st.sidebar:
             elif not month_str and pd.notna(spend_val): st.sidebar.warning(f"Row {index+1} in historical spend has amount but no month. Ignoring.");
         if valid_hist_spend_entries: ad_spend_input_dict = temp_ad_spend_input_dict; st.session_state.historical_spend_df = edited_historical_spend_df
     st.divider()
-    with st.expander("Performance Scoring Weights"): # Renamed for generality
+    with st.expander("Performance Scoring Weights"): 
         weights_input_local = {}
         weights_input_local["Qual -> ICF %"] = st.slider("Qual (POF) -> ICF %", 0, 100, 20, key='w_qicf_v2')
         weights_input_local["Avg TTC (Days)"] = st.slider("Avg Time to Contact", 0, 100, 25, key='w_ttc_v2', help="Note: This metric is more relevant for Site Performance.")
         weights_input_local["Avg Funnel Movement Steps"] = st.slider("Avg Funnel Movement Steps", 0, 100, 5, key='w_fms_v2', help="Note: This metric is more relevant for Site Performance.")
-        # Site Screen Fail % is now Screen Fail % (from ICF)
-        weights_input_local["Screen Fail % (from ICF)"] = st.slider("Screen Fail % (from ICF)", 0, 100, 5, key='w_sfr_v3') # Updated key and name
+        
+        # Ensuring correct weight keys match output of calculate_grouped_performance_metrics
+        weights_input_local["Screen Fail % (from ICF)"] = st.slider("Screen Fail % (from ICF)", 0, 100, 5, key='w_sfr_v3_generic', help="Screen Failures as % of ICFs. Used for Ad Performance.")
+        weights_input_local["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr_v2_site', help="Used for Site Performance.") # Keep specific for site if desired
+        
         weights_input_local["StS -> Appt %"] = st.slider("StS -> Appt Sched %", 0, 100, 30, key='w_sa_site_score_v2')
         weights_input_local["Appt -> ICF %"] = st.slider("Appt Sched -> ICF %", 0, 100, 15, key='w_ai_site_score_v2')
         weights_input_local["Lag Qual -> ICF (Days)"] = st.slider("Lag Qual (POF) -> ICF (Days)", 0, 100, 0, key='w_lagqicf_v2')
-        # Generic "Projection Lag" vs "Site Projection Lag"
-        weights_input_local["Projection Lag (Days)"] = st.slider("Overall Projection Lag (Days)", 0, 100, 0, key='w_projlag_v3', help="Sum of average lags for key funnel segments; used for Ad Performance.")
-        weights_input_local["Site Projection Lag (Days)"] = st.slider("Site Projection Lag (Days)", 0, 100, 0, key='w_siteprojlag_v2', help="Used for Site Performance if different from overall.")
+
+        weights_input_local["Projection Lag (Days)"] = st.slider("Overall Projection Lag (Days)", 0, 100, 0, key='w_projlag_v3', help="Sum of avg lags for key funnel segments; for Ad Performance.")
+        weights_input_local["Site Projection Lag (Days)"] = st.slider("Site Projection Lag (Days)", 0, 100, 0, key='w_siteprojlag_v2', help="Used for Site Performance.")
 
         total_weight_input_local = sum(abs(w) for w in weights_input_local.values())
         if total_weight_input_local > 0: weights_normalized = {k: v / total_weight_input_local for k, v in weights_input_local.items()}
@@ -1544,7 +1548,7 @@ if st.session_state.data_processed_successfully:
     with tab_site_perf: 
         st.header("Site Performance Ranking")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized and not site_metrics_calculated_data.empty:
-            ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized) # Uses the original score_sites for now
+            ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized) 
             st.subheader("Site Ranking")
             display_cols_sites_tab2 = ['Site', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
                                    'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
@@ -1574,13 +1578,13 @@ if st.session_state.data_processed_successfully:
 
         if not st.session_state.data_processed_successfully or referral_data_processed is None or referral_data_processed.empty:
             st.warning("Please upload and process referral data first.")
-        elif "UTM Source" not in referral_data_processed.columns: # Check if essential UTM col exists
+        elif "UTM Source" not in referral_data_processed.columns:
             st.warning("UTM Source column not found in the uploaded data. Ad Performance cannot be calculated.")
         else:
             df_for_ad_perf = referral_data_processed.copy()
-            # Ensure UTM Medium exists for combined analysis, fill with placeholder if not
-            if "UTM Medium" not in df_for_ad_perf.columns:
-                df_for_ad_perf["UTM Medium"] = "N/A" # Or "Unspecified"
+            # UTM Medium is not used for grouping in this simplified version
+            # if "UTM Medium" not in df_for_ad_perf.columns:
+            #     df_for_ad_perf["UTM Medium"] = "N/A" 
 
             st.subheader("Performance by UTM Source")
             utm_source_metrics_df = calculate_grouped_performance_metrics(
@@ -1590,15 +1594,12 @@ if st.session_state.data_processed_successfully:
             )
 
             if not utm_source_metrics_df.empty:
-                # The grouping_key_for_df inside calculate_grouped_performance_metrics becomes "UTM Source_Cleaned"
+                # calculate_grouped_performance_metrics now returns the df with "UTM Source" as the group column name
                 ranked_utm_source_df = score_performance_groups(
                     utm_source_metrics_df, weights_normalized,
-                    group_col_name="UTM Source_Cleaned" 
+                    group_col_name="UTM Source" # This should now match the column name
                 )
-                # Rename for display
-                if "UTM Source_Cleaned" in ranked_utm_source_df.columns:
-                    ranked_utm_source_df.rename(columns={"UTM Source_Cleaned": "UTM Source"}, inplace=True)
-
+                
                 display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
                                    'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
                                    'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
@@ -1624,48 +1625,10 @@ if st.session_state.data_processed_successfully:
                 else: st.info("No data to display for UTM Source performance after processing.")
             else: st.info("Could not calculate performance metrics for UTM Source.")
 
-            st.markdown("---")
-            st.subheader("Performance by UTM Source / UTM Medium")
-            utm_combo_metrics_df = calculate_grouped_performance_metrics(
-                df_for_ad_perf, ordered_stages, ts_col_map,
-                grouping_cols=["UTM Source", "UTM Medium"],
-                unclassified_label="Unclassified"
-            )
-
-            if not utm_combo_metrics_df.empty:
-                # Group col name will be "Combined_Group_Key"
-                ranked_utm_combo_df = score_performance_groups(
-                    utm_combo_metrics_df, weights_normalized,
-                    group_col_name="Combined_Group_Key"
-                )
-                if "Combined_Group_Key" in ranked_utm_combo_df.columns:
-                    ranked_utm_combo_df.rename(columns={"Combined_Group_Key": "UTM Source / Medium"}, inplace=True)
-
-                display_cols_ad_combo = ['UTM Source / Medium', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
-                                   'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
-                                   'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
-                                   'Avg TTC (Days)', 'Avg Funnel Movement Steps']
-                
-                display_cols_ad_combo_exist = [col for col in display_cols_ad_combo if col in ranked_utm_combo_df.columns]
-                final_ad_combo_display = ranked_utm_combo_df[display_cols_ad_combo_exist].copy()
-
-                if not final_ad_combo_display.empty:
-                    if 'Score' in final_ad_combo_display.columns: final_ad_combo_display['Score'] = final_ad_combo_display['Score'].round(1)
-                    for col_fmt in final_ad_combo_display.columns: 
-                        if '%' in col_fmt and final_ad_combo_display[col_fmt].dtype == 'float':
-                            final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
-                        elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_combo_display[col_fmt].dtype == 'float':
-                            final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
-                        elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_combo_display[col_fmt]):
-                             final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
-                    st.dataframe(final_ad_combo_display.style.format(na_rep='-'))
-                    try:
-                        csv_ad_combo = final_ad_combo_display.to_csv(index=False).encode('utf-8')
-                        st.download_button(label="Download UTM Source/Medium Performance", data=csv_ad_combo, file_name='utm_combo_performance.csv', mime='text/csv', key='dl_ad_combo_perf_v2')
-                    except Exception as e_dl_adc: st.warning(f"UTM Combo performance download error: {e_dl_adc}")
-                else: st.info("No data to display for UTM Source / Medium performance after processing.")
-            else: st.info("Could not calculate performance metrics for UTM Source / Medium combination.")
-
+            # Removed the UTM Source / UTM Medium section as per request
+            # st.markdown("---")
+            # st.subheader("Performance by UTM Source / UTM Medium")
+            # ... (logic for combined table was here) ...
 
     with tab_projections: 
         st.header("Projections (Based on Future Spend)")
@@ -1803,7 +1766,7 @@ if st.session_state.data_processed_successfully:
         - **CPQL Inflation & Monthly QL Multiplier:** Optionally, model increasing CPQL with higher volume and control monthly QL planning aggressiveness (set in sidebar).
         - **ICF Variation:** Applies a +/- percentage to generated ICFs for CPICF sensitivity (set in sidebar).
         """)
-
+        # CONTINUATION FROM HERE...
         ai_cols_goals = st.columns(3)
         with ai_cols_goals[0]:
             ai_goal_lpi_date = st.date_input("Target LPI Date", value=datetime.now() + pd.DateOffset(months=12), min_value=datetime.now() + pd.DateOffset(months=1), key="ai_lpi_date_v3")
@@ -1865,8 +1828,12 @@ if st.session_state.data_processed_successfully:
                 })
 
             if site_activity_editor_data_list:
-                edited_site_activity_df = st.data_editor(
-                    pd.DataFrame(site_activity_editor_data_list),
+                # Initialize session state for the data editor if it doesn't exist
+                if 'edited_site_activity_df' not in st.session_state:
+                    st.session_state.edited_site_activity_df = pd.DataFrame(site_activity_editor_data_list)
+                
+                edited_site_activity_df_ui = st.data_editor(
+                    st.session_state.edited_site_activity_df, # Use session state here
                     key="ai_site_activity_editor_v1", 
                     use_container_width=True,
                     column_config={
@@ -1876,9 +1843,13 @@ if st.session_state.data_processed_successfully:
                     },
                     num_rows="dynamic" 
                 )
+                # Update session state if the dataframe has been changed by the user
+                if not edited_site_activity_df_ui.equals(st.session_state.edited_site_activity_df):
+                    st.session_state.edited_site_activity_df = edited_site_activity_df_ui
 
-                if edited_site_activity_df is not None:
-                    for _, row_act_val in edited_site_activity_df.iterrows():
+
+                if edited_site_activity_df_ui is not None:
+                    for _, row_act_val in edited_site_activity_df_ui.iterrows():
                         site_name_from_editor = row_act_val["Site"]
                         act_date_str = str(row_act_val["Activation Date (YYYY-MM)"]).strip() if pd.notna(row_act_val["Activation Date (YYYY-MM)"]) else ""
                         deact_date_str = str(row_act_val["Deactivation Date (YYYY-MM)"]).strip() if pd.notna(row_act_val["Deactivation Date (YYYY-MM)"]) else ""
@@ -1921,13 +1892,30 @@ if st.session_state.data_processed_successfully:
                         avg_monthly_ql_per_site_val = site_monthly_counts_for_avg_val.groupby('Site')['MonthlyPOFCount'].mean().round(0).astype(int).to_dict()
             for site_name_cap_iter_val in site_metrics_calculated_data['Site'].unique():
                 site_cap_editor_data_list.append({ "Site": site_name_cap_iter_val, "Historical Avg. Monthly POF": avg_monthly_ql_per_site_val.get(site_name_cap_iter_val, 0), "Monthly POF Cap": np.nan })
+            
             if site_cap_editor_data_list:
                 st.caption("Set a maximum number of 'Passed Online Form' (POF) leads a site can handle per month. Leave blank for no cap.")
-                edited_site_caps_df_ai_val = st.data_editor( pd.DataFrame(site_cap_editor_data_list), key="ai_site_caps_editor_v3", use_container_width=True,
-                    column_config={ "Site": st.column_config.TextColumn(disabled=True), "Historical Avg. Monthly POF": st.column_config.NumberColumn(format="%d", disabled=True), "Monthly POF Cap": st.column_config.NumberColumn(min_value=0, format="%d", step=1)},
-                    num_rows="dynamic" )
-                if edited_site_caps_df_ai_val is not None:
-                    for _, row_cap_ai_val in edited_site_caps_df_ai_val.iterrows():
+                # Initialize session state for the site caps editor
+                if 'edited_site_caps_df_ai_val' not in st.session_state:
+                    st.session_state.edited_site_caps_df_ai_val = pd.DataFrame(site_cap_editor_data_list)
+
+                edited_site_caps_df_ai_val_ui = st.data_editor( 
+                    st.session_state.edited_site_caps_df_ai_val, # Use session state
+                    key="ai_site_caps_editor_v3", 
+                    use_container_width=True,
+                    column_config={ 
+                        "Site": st.column_config.TextColumn(disabled=True), 
+                        "Historical Avg. Monthly POF": st.column_config.NumberColumn(format="%d", disabled=True), 
+                        "Monthly POF Cap": st.column_config.NumberColumn(min_value=0, format="%d", step=1)
+                    },
+                    num_rows="dynamic" 
+                )
+                if not edited_site_caps_df_ai_val_ui.equals(st.session_state.edited_site_caps_df_ai_val):
+                     st.session_state.edited_site_caps_df_ai_val = edited_site_caps_df_ai_val_ui
+
+
+                if edited_site_caps_df_ai_val_ui is not None:
+                    for _, row_cap_ai_val in edited_site_caps_df_ai_val_ui.iterrows():
                         if pd.notna(row_cap_ai_val["Monthly POF Cap"]) and row_cap_ai_val["Monthly POF Cap"] >= 0:
                             default_site_caps_ai_input_val[row_cap_ai_val["Site"]] = int(row_cap_ai_val["Monthly POF Cap"])
             else: st.caption("No site data available to set caps.")
@@ -1991,7 +1979,7 @@ if st.session_state.data_processed_successfully:
                     avg_overall_lag_days=avg_pof_icf_lag_ai_val,
                     site_metrics_df=site_metrics_calculated_data, projection_horizon_months=proj_horizon_sidebar,
                     site_caps_input=default_site_caps_ai_input_val,
-                    site_activity_schedule=default_site_activity_schedule_input, # Pass the new schedule
+                    site_activity_schedule=default_site_activity_schedule_input, 
                     site_scoring_weights_for_ai=weights_normalized,
                     cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                     run_mode=run_mode_for_call_primary_val,
