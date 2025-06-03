@@ -118,6 +118,14 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     df = pd.concat([df, timestamp_cols_df], axis=1)
     for stage, ts_col in ts_col_map.items():
          if ts_col in df.columns: df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
+
+    # Ensure UTM columns exist for Ad Performance Tab
+    if "UTM Source" not in df.columns:
+        st.info("'UTM Source' column not found in data. Ad Performance tab may not function fully.")
+        df["UTM Source"] = np.nan # Create with NaNs if it doesn't exist
+    if "UTM Medium" not in df.columns:
+        st.info("'UTM Medium' column not found in data. Ad Performance tab may not function fully.")
+        df["UTM Medium"] = np.nan # Create with NaNs if it doesn't exist
     return df
 
 def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
@@ -218,39 +226,88 @@ def calculate_overall_inter_stage_lags(_processed_df, ordered_stages, ts_col_map
             inter_stage_lags[f"{stage_from} -> {stage_to}"] = np.nan
     return inter_stage_lags
 
+# This is the original calculate_site_metrics function
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns:
         return pd.DataFrame()
-    processed_df = _processed_df.copy(); site_metrics_list = []
+    # It now primarily calls the generic function
+    return calculate_grouped_performance_metrics(
+        _processed_df, ordered_stages, ts_col_map,
+        grouping_cols=["Site"], # Specific grouping for sites
+        unclassified_label="Unassigned Site" # Specific label for sites
+    )
+
+# NEW: Generic function for calculating performance metrics based on grouping columns
+def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_map, grouping_cols: list, unclassified_label="Unclassified"):
+    if _processed_df is None or _processed_df.empty:
+        return pd.DataFrame()
+
+    processed_df_copy = _processed_df.copy()
+    
+    # Ensure all grouping columns exist and create a single grouping key
+    actual_grouping_key_col_name = "" # This will be the name of the column to group by and then set as index for scoring
+    
+    if len(grouping_cols) == 1:
+        gc_single = grouping_cols[0]
+        if gc_single not in processed_df_copy.columns:
+            st.warning(f"Grouping column '{gc_single}' not found. Results for this grouping might be empty or based on '{unclassified_label}'.")
+            processed_df_copy[gc_single] = unclassified_label 
+        processed_df_copy[f"{gc_single}_Cleaned"] = processed_df_copy[gc_single].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
+        actual_grouping_key_col_name = f"{gc_single}_Cleaned" # Store the name of the cleaned column
+    elif len(grouping_cols) > 1:
+        actual_grouping_key_col_name = "Combined_Group_Key" # Name for the combined key column
+        temp_clean_cols_for_join = []
+        for i, gc_item in enumerate(grouping_cols):
+            if gc_item not in processed_df_copy.columns:
+                st.warning(f"Grouping column '{gc_item}' not found. Results for this grouping might be empty or based on '{unclassified_label}'.")
+                processed_df_copy[gc_item] = unclassified_label
+            temp_col_name = f"_temp_clean_join_{i}" # Temporary column name
+            processed_df_copy[temp_col_name] = processed_df_copy[gc_item].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
+            temp_clean_cols_for_join.append(temp_col_name)
+        processed_df_copy[actual_grouping_key_col_name] = processed_df_copy[temp_clean_cols_for_join].apply(lambda x: " / ".join(x), axis=1)
+        # processed_df_copy.drop(columns=temp_clean_cols_for_join, inplace=True, errors='ignore') # Optional cleanup
+    else:
+        st.error("No grouping columns provided for performance metrics calculation.")
+        return pd.DataFrame()
+
+    performance_metrics_list = []
     ts_pof_col = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
     ts_psa_col = ts_col_map.get(STAGE_PRE_SCREENING_ACTIVITIES)
     ts_sts_col = ts_col_map.get(STAGE_SENT_TO_SITE)
     ts_appt_col = ts_col_map.get(STAGE_APPOINTMENT_SCHEDULED)
     ts_icf_col = ts_col_map.get(STAGE_SIGNED_ICF)
     ts_sf_col = ts_col_map.get(STAGE_SCREEN_FAILED)
+
     potential_ts_cols = [ts_pof_col, ts_psa_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col]
-    for col_name in potential_ts_cols:
-        if col_name and col_name not in processed_df.columns:
-            processed_df[col_name] = pd.NaT
-            processed_df[col_name] = pd.to_datetime(processed_df[col_name], errors='coerce')
-    site_contact_attempt_statuses = ["Site Contact Attempt 1"]
-    post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED]
-    projection_segments_for_site_lag = [
+    for col_name_ts in potential_ts_cols:
+        if col_name_ts and col_name_ts not in processed_df_copy.columns:
+            processed_df_copy[col_name_ts] = pd.NaT
+            processed_df_copy[col_name_ts] = pd.to_datetime(processed_df_copy[col_name_ts], errors='coerce')
+
+    projection_segments_for_lag_path = [
         (STAGE_PASSED_ONLINE_FORM, STAGE_PRE_SCREENING_ACTIVITIES),
         (STAGE_PRE_SCREENING_ACTIVITIES, STAGE_SENT_TO_SITE),
         (STAGE_SENT_TO_SITE, STAGE_APPOINTMENT_SCHEDULED),
         (STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF)
     ]
+    # For Ad Performance, TTC and Funnel Movement might be less relevant or need different logic.
+    # These constants are kept for structural similarity but their use is conditional/omitted for Ad Performance.
+    site_contact_attempt_statuses = ["Site Contact Attempt 1"]
+    post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED]
+
+
     try:
-        site_groups = processed_df.groupby('Site')
-        for site_name, group in site_groups:
-            metrics = {'Site': site_name}
-            count_pof = group[ts_pof_col].notna().sum() if ts_pof_col and ts_pof_col in group else 0
-            count_psa = group[ts_psa_col].notna().sum() if ts_psa_col and ts_psa_col in group else 0
-            count_sts = group[ts_sts_col].notna().sum() if ts_sts_col and ts_sts_col in group else 0
-            count_appt = group[ts_appt_col].notna().sum() if ts_appt_col and ts_appt_col in group else 0
-            count_icf = group[ts_icf_col].notna().sum() if ts_icf_col and ts_icf_col in group else 0
-            count_sf = group[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group else 0
+        grouped_data = processed_df_copy.groupby(actual_grouping_key_col_name)
+        for group_name_val, group_df in grouped_data:
+            metrics = {actual_grouping_key_col_name: group_name_val} # This will be the column for group labels
+            
+            count_pof = group_df[ts_pof_col].notna().sum() if ts_pof_col and ts_pof_col in group_df else 0
+            count_psa = group_df[ts_psa_col].notna().sum() if ts_psa_col and ts_psa_col in group_df else 0
+            count_sts = group_df[ts_sts_col].notna().sum() if ts_sts_col and ts_sts_col in group_df else 0
+            count_appt = group_df[ts_appt_col].notna().sum() if ts_appt_col and ts_appt_col in group_df else 0
+            count_icf = group_df[ts_icf_col].notna().sum() if ts_icf_col and ts_icf_col in group_df else 0
+            count_sf = group_df[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group_df else 0
+
             metrics['Total Qualified'] = count_pof; metrics['PSA Count'] = count_psa
             metrics['StS Count'] = count_sts; metrics['Appt Count'] = count_appt; metrics['ICF Count'] = count_icf
             metrics['POF -> PSA %'] = (count_psa / count_pof) if count_pof > 0 else 0.0
@@ -258,130 +315,178 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
             metrics['StS -> Appt %'] = (count_appt / count_sts) if count_sts > 0 else 0.0
             metrics['Appt -> ICF %'] = (count_icf / count_appt) if count_appt > 0 else 0.0
             metrics['Qual -> ICF %'] = (count_icf / count_pof) if count_pof > 0 else 0.0
-            site_total_projection_lag = 0.0; valid_lag_segments = 0
-            for seg_from_name, seg_to_name in projection_segments_for_site_lag:
+
+            group_total_projection_lag = 0.0; valid_lag_segments_group = 0
+            for seg_from_name, seg_to_name in projection_segments_for_lag_path:
                 ts_seg_from = ts_col_map.get(seg_from_name); ts_seg_to = ts_col_map.get(seg_to_name)
-                if ts_seg_from and ts_seg_to and ts_seg_from in group.columns and ts_seg_to in group.columns:
-                    segment_lag = calculate_avg_lag_generic(group, ts_seg_from, ts_seg_to)
-                    if pd.notna(segment_lag): site_total_projection_lag += segment_lag; valid_lag_segments +=1
-                    else: site_total_projection_lag = np.nan; break
-                else: site_total_projection_lag = np.nan; break
-            if valid_lag_segments < len(projection_segments_for_site_lag): site_total_projection_lag = np.nan
-            metrics['Site Projection Lag (Days)'] = site_total_projection_lag
-            metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag_generic(group, ts_pof_col, ts_icf_col) if ts_pof_col and ts_icf_col else np.nan
-            ttc_times = []; funnel_movement_steps = []
-            parsed_status_col_name = f"Parsed_Lead_Status_History"; parsed_stage_col_name = f"Parsed_Lead_Stage_History"
-            sent_to_site_group = group.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group else pd.DataFrame()
-            if not sent_to_site_group.empty and parsed_status_col_name in sent_to_site_group.columns and parsed_stage_col_name in sent_to_site_group.columns:
-                for idx, row in sent_to_site_group.iterrows():
-                    ts_sent = row[ts_sts_col]; first_contact_ts = pd.NaT
-                    history_list_status = row.get(parsed_status_col_name, [])
-                    if history_list_status:
-                        for status_name, event_dt in history_list_status:
-                            if status_name in site_contact_attempt_statuses and pd.notna(event_dt) and pd.notna(ts_sent) and event_dt >= ts_sent:
-                                first_contact_ts = event_dt; break
-                    if pd.notna(first_contact_ts) and pd.notna(ts_sent):
-                        time_diff = first_contact_ts - ts_sent
-                        if time_diff >= pd.Timedelta(0): ttc_times.append(time_diff.total_seconds() / (60*60*24))
-                    stages_reached_post_sts = set()
-                    history_list_stage = row.get(parsed_stage_col_name, [])
-                    if history_list_stage and pd.notna(ts_sent):
-                         for stage_name_hist, event_dt_hist in history_list_stage:
-                             if stage_name_hist in post_sts_progress_stages and pd.notna(event_dt_hist) and event_dt_hist > ts_sent:
-                                 stages_reached_post_sts.add(stage_name_hist)
-                    funnel_movement_steps.append(len(stages_reached_post_sts))
-            metrics['Avg TTC (Days)'] = np.mean(ttc_times) if ttc_times else np.nan
-            metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps) if funnel_movement_steps else 0.0
-            metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0
-            site_metrics_list.append(metrics)
-        site_metrics_df_final = pd.DataFrame(site_metrics_list)
-        return site_metrics_df_final
+                if ts_seg_from and ts_seg_to and ts_seg_from in group_df.columns and ts_seg_to in group_df.columns:
+                    segment_lag = calculate_avg_lag_generic(group_df, ts_seg_from, ts_seg_to)
+                    if pd.notna(segment_lag): group_total_projection_lag += segment_lag; valid_lag_segments_group +=1
+                    else: group_total_projection_lag = np.nan; break
+                else: group_total_projection_lag = np.nan; break
+            if valid_lag_segments_group < len(projection_segments_for_lag_path): group_total_projection_lag = np.nan
+            
+            # Use a generic name for the lag column that score_performance_groups can use
+            # If this function is called for "Site" grouping, "Site Projection Lag (Days)" is one of the weight keys.
+            # If for ads, "Projection Lag (Days)" would be the key.
+            if grouping_cols == ["Site"]: # Specific handling for original site metrics
+                 metrics['Site Projection Lag (Days)'] = group_total_projection_lag
+                 # Also calculate original Site Screen Fail % for sites if needed for weights
+                 metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0
+                 # TTC and Funnel Movement for Sites
+                 ttc_times_group = []; funnel_movement_steps_group = []
+                 parsed_status_col_name = f"Parsed_Lead_Status_History"; parsed_stage_col_name = f"Parsed_Lead_Stage_History"
+                 sent_to_site_group_df = group_df.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group_df else pd.DataFrame()
+                 if not sent_to_site_group_df.empty and parsed_status_col_name in sent_to_site_group_df.columns and parsed_stage_col_name in sent_to_site_group_df.columns:
+                     for idx, row in sent_to_site_group_df.iterrows():
+                         ts_sent = row[ts_sts_col]; first_contact_ts = pd.NaT
+                         history_list_status = row.get(parsed_status_col_name, [])
+                         if history_list_status:
+                             for status_name, event_dt in history_list_status:
+                                 if status_name in site_contact_attempt_statuses and pd.notna(event_dt) and pd.notna(ts_sent) and event_dt >= ts_sent:
+                                     first_contact_ts = event_dt; break
+                         if pd.notna(first_contact_ts) and pd.notna(ts_sent):
+                             time_diff = first_contact_ts - ts_sent
+                             if time_diff >= pd.Timedelta(0): ttc_times_group.append(time_diff.total_seconds() / (60*60*24))
+                         stages_reached_post_sts = set()
+                         history_list_stage = row.get(parsed_stage_col_name, [])
+                         if history_list_stage and pd.notna(ts_sent):
+                              for stage_name_hist, event_dt_hist in history_list_stage:
+                                  if stage_name_hist in post_sts_progress_stages and pd.notna(event_dt_hist) and event_dt_hist > ts_sent:
+                                      stages_reached_post_sts.add(stage_name_hist)
+                         funnel_movement_steps_group.append(len(stages_reached_post_sts))
+                 metrics['Avg TTC (Days)'] = np.mean(ttc_times_group) if ttc_times_group else np.nan
+                 metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps_group) if funnel_movement_steps_group else 0.0
+            else: # For Ad groupings (UTM Source, etc.)
+                 metrics['Projection Lag (Days)'] = group_total_projection_lag
+                 metrics['Screen Fail % (from ICF)'] = (count_sf / count_icf) if count_icf > 0 else 0.0
+                 metrics['Avg TTC (Days)'] = np.nan # Not applicable or defined for ads
+                 metrics['Avg Funnel Movement Steps'] = 0.0 # Not applicable or defined for ads
+
+
+            metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag_generic(group_df, ts_pof_col, ts_icf_col) if ts_pof_col and ts_icf_col else np.nan
+            performance_metrics_list.append(metrics)
+
+        performance_df_final = pd.DataFrame(performance_metrics_list)
+        # Rename the grouping key column to match the original first grouping col name for better display if it was a single column
+        if len(grouping_cols) == 1 and actual_grouping_key_col_name != grouping_cols[0]:
+            performance_df_final.rename(columns={actual_grouping_key_col_name: grouping_cols[0]}, inplace=True)
+
+        return performance_df_final
     except Exception as e:
-        st.error(f"Error calculating site metrics: {e}"); st.exception(e)
+        st.error(f"Error calculating grouped performance metrics: {e}"); st.exception(e)
         return pd.DataFrame()
 
-def score_sites(_site_metrics_df, weights):
-    if _site_metrics_df is None or _site_metrics_df.empty: return pd.DataFrame()
+# MODIFIED: Renamed score_sites to score_performance_groups and generalized
+def score_performance_groups(_performance_metrics_df, weights, group_col_name="Group_Key_Temp"): # group_col_name is the name of the column to set as index
+    if _performance_metrics_df is None or _performance_metrics_df.empty: return pd.DataFrame()
     try:
-        site_metrics_df = _site_metrics_df.copy();
-        if 'Site' not in site_metrics_df.columns:
-             if site_metrics_df.index.name == 'Site': site_metrics_df = site_metrics_df.reset_index()
-             else: st.error("Site Scoring: 'Site' column missing."); return pd.DataFrame()
-        site_metrics_df_indexed = site_metrics_df.set_index('Site')
+        performance_metrics_df = _performance_metrics_df.copy()
+        
+        # Ensure the group_col_name (which will become the index) exists
+        if group_col_name not in performance_metrics_df.columns:
+            # Try to find a suitable default if the exact temp key isn't there (e.g. if renamed before call)
+            if "Site" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp": # Special case for original site_metrics call
+                group_col_name = "Site"
+            elif "UTM Source" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp":
+                group_col_name = "UTM Source"
+            elif "UTM Source / Medium" in performance_metrics_df.columns and group_col_name == "Group_Key_Temp":
+                 group_col_name = "UTM Source / Medium"
+            else:
+                st.error(f"Scoring: Grouping column '{group_col_name}' missing from metrics DataFrame. Available: {performance_metrics_df.columns.tolist()}");
+                return _performance_metrics_df # Return original if error
+
+        performance_metrics_df[group_col_name] = performance_metrics_df[group_col_name].fillna("Unknown Group")
+        if performance_metrics_df[group_col_name].duplicated().any():
+            performance_metrics_df = performance_metrics_df.drop_duplicates(subset=[group_col_name], keep='first')
+
+        performance_metrics_df_indexed = performance_metrics_df.set_index(group_col_name)
+
         metrics_to_scale = list(weights.keys())
-        lower_is_better = ["Avg TTC (Days)", "Site Screen Fail %", "Lag Qual -> ICF (Days)", "Site Projection Lag (Days)"]
-        scaled_metrics_data = site_metrics_df_indexed.reindex(columns=metrics_to_scale).copy()
+        # Updated lower_is_better to reflect potentially generic names and specific site names
+        lower_is_better = ["Avg TTC (Days)", "Screen Fail % (from ICF)", "Site Screen Fail %", 
+                           "Lag Qual -> ICF (Days)", "Projection Lag (Days)", "Site Projection Lag (Days)"]
+
+        scaled_metrics_data = performance_metrics_df_indexed.reindex(columns=metrics_to_scale).copy()
         for col in metrics_to_scale:
             if col not in scaled_metrics_data.columns:
                 scaled_metrics_data[col] = 0 if col not in lower_is_better else np.nan
             if col in lower_is_better:
                 max_val = scaled_metrics_data[col].max(skipna=True);
-                fill_val = (max_val + scaled_metrics_data[col].std(skipna=True)) if pd.notna(max_val) and max_val > 0 and pd.notna(scaled_metrics_data[col].std(skipna=True)) else 999
+                std_val = scaled_metrics_data[col].std(skipna=True)
+                fill_val = (max_val + std_val) if pd.notna(max_val) and max_val > 0 and pd.notna(std_val) and std_val > 0 else (max_val * 1.5 if pd.notna(max_val) and max_val > 0 else 999)
                 scaled_metrics_data[col] = scaled_metrics_data[col].fillna(fill_val)
             else:
                 scaled_metrics_data[col] = scaled_metrics_data[col].fillna(0)
+
         scaled_metrics_display = pd.DataFrame(index=scaled_metrics_data.index)
         if not scaled_metrics_data.empty:
             for col in metrics_to_scale:
                  if col in scaled_metrics_data.columns:
                      min_val = scaled_metrics_data[col].min(); max_val = scaled_metrics_data[col].max()
-                     if min_val == max_val: scaled_metrics_display[col] = 0.5
+                     if min_val == max_val : scaled_metrics_display[col] = 0.5
                      elif pd.notna(min_val) and pd.notna(max_val) and (max_val - min_val) != 0 :
                          scaler = MinMaxScaler();
                          scaled_values = scaler.fit_transform(scaled_metrics_data[[col]]);
                          scaled_metrics_display[col] = scaled_values.flatten()
                      else: scaled_metrics_display[col] = 0.5
                  else: scaled_metrics_display[col] = 0.5
+
             for col in lower_is_better:
                 if col in scaled_metrics_display.columns: scaled_metrics_display[col] = 1 - scaled_metrics_display[col]
-        site_metrics_df_indexed['Score_Raw'] = 0.0; total_weight_applied = 0.0
+
+        performance_metrics_df_indexed['Score_Raw'] = 0.0; total_weight_applied = 0.0
         for metric, weight_value in weights.items():
-             if metric in scaled_metrics_display.columns:
+             if metric in scaled_metrics_display.columns: # Check if the weight's metric exists as a scaled column
                  current_scaled_metric_series = scaled_metrics_display.get(metric)
                  if current_scaled_metric_series is not None:
-                     site_metrics_df_indexed['Score_Raw'] += current_scaled_metric_series.fillna(0.5) * weight_value
-                 else: site_metrics_df_indexed['Score_Raw'] += 0.5 * weight_value
+                     performance_metrics_df_indexed['Score_Raw'] += current_scaled_metric_series.fillna(0.5) * weight_value
+                 else: performance_metrics_df_indexed['Score_Raw'] += 0.5 * weight_value
                  total_weight_applied += abs(weight_value)
-        if total_weight_applied > 0: site_metrics_df_indexed['Score'] = (site_metrics_df_indexed['Score_Raw'] / total_weight_applied) * 100
-        else: site_metrics_df_indexed['Score'] = 0.0
-        site_metrics_df_indexed['Score'] = site_metrics_df_indexed['Score'].fillna(0.0)
-        if len(site_metrics_df_indexed) > 1:
-            site_metrics_df_indexed['Score_Rank_Percentile'] = site_metrics_df_indexed['Score'].rank(pct=True)
+             # else: st.sidebar.warning(f"Weight metric '{metric}' not found in scaled data for scoring. Skipping.")
+
+
+        if total_weight_applied > 0: performance_metrics_df_indexed['Score'] = (performance_metrics_df_indexed['Score_Raw'] / total_weight_applied) * 100
+        else: performance_metrics_df_indexed['Score'] = 0.0
+
+        performance_metrics_df_indexed['Score'] = performance_metrics_df_indexed['Score'].fillna(0.0)
+
+        if len(performance_metrics_df_indexed) > 1:
+            performance_metrics_df_indexed['Score_Rank_Percentile'] = performance_metrics_df_indexed['Score'].rank(pct=True)
             bins = [0, 0.10, 0.25, 0.60, 0.85, 1.0]; labels = ['F', 'D', 'C', 'B', 'A']
-            try: site_metrics_df_indexed['Grade'] = pd.qcut(site_metrics_df_indexed['Score_Rank_Percentile'], q=bins, labels=labels, duplicates='drop')
+            try: performance_metrics_df_indexed['Grade'] = pd.qcut(performance_metrics_df_indexed['Score_Rank_Percentile'], q=bins, labels=labels, duplicates='drop')
             except ValueError:
-                 st.warning("Using fixed score ranges for grading (percentile method failed due to data distribution).")
+                 st.warning(f"Using fixed score ranges for grading '{performance_metrics_df_indexed.index.name}' (percentile method failed).")
                  def assign_grade_fallback(score_value):
                      if pd.isna(score_value): return 'N/A'
                      score_value = round(score_value)
-                     if score_value >= 90: return 'A'
-                     elif score_value >= 80: return 'B'
-                     elif score_value >= 70: return 'C'
-                     elif score_value >= 60: return 'D'
-                     else: return 'F'
-                 site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_grade_fallback)
-            site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A')
-        elif len(site_metrics_df_indexed) == 1:
-            def assign_single_site_grade(score_value):
+                     if score_value >= 90: return 'A'; elif score_value >= 80: return 'B'; elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'; else: return 'F'
+                 performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Score'].apply(assign_grade_fallback)
+            performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Grade'].astype(str).replace('nan', 'N/A')
+        elif len(performance_metrics_df_indexed) == 1:
+            def assign_single_group_grade(score_value):
                 if pd.isna(score_value): return 'N/A'
                 score_value = round(score_value)
-                if score_value >= 90: return 'A'
-                elif score_value >= 80: return 'B'
-                elif score_value >= 70: return 'C'
-                elif score_value >= 60: return 'D'
-                else: return 'F'
-            site_metrics_df_indexed['Grade'] = site_metrics_df_indexed['Score'].apply(assign_single_site_grade)
-        else: site_metrics_df_indexed['Grade'] = None
-        final_df_output = site_metrics_df_indexed.reset_index()
+                if score_value >= 90: return 'A'; elif score_value >= 80: return 'B'; elif score_value >= 70: return 'C'; elif score_value >= 60: return 'D'; else: return 'F'
+            performance_metrics_df_indexed['Grade'] = performance_metrics_df_indexed['Score'].apply(assign_single_group_grade)
+        else: performance_metrics_df_indexed['Grade'] = None
+
+        final_df_output = performance_metrics_df_indexed.reset_index()
         if 'Score' in final_df_output.columns: final_df_output = final_df_output.sort_values('Score', ascending=False)
         return final_df_output
     except Exception as e:
-        st.error(f"Error during Site Scoring: {e}"); st.exception(e)
-        if _site_metrics_df is not None and not _site_metrics_df.empty:
-             if _site_metrics_df.index.name == 'Site' and 'Site' not in _site_metrics_df.columns: return _site_metrics_df.reset_index()
-             return _site_metrics_df
+        st.error(f"Error during Performance Group Scoring: {e}"); st.exception(e)
+        if _performance_metrics_df is not None and not _performance_metrics_df.empty:
+             if _performance_metrics_df.index.name == group_col_name and group_col_name not in _performance_metrics_df.columns:
+                 return _performance_metrics_df.reset_index()
+             return _performance_metrics_df
         return pd.DataFrame()
 
+# score_sites will now call the generic function for backward compatibility if needed, or can be phased out.
+def score_sites(_site_metrics_df, weights):
+    # The _site_metrics_df from calculate_site_metrics should have 'Site' as a column
+    # It's better if calculate_site_metrics ensures 'Site' is the group_col_name passed to score_performance_groups
+    return score_performance_groups(_site_metrics_df, weights, group_col_name="Site")
 def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map,
                                           rate_method_sidebar, rolling_window_sidebar, manual_rates_sidebar,
                                           inter_stage_lags_for_maturity,
@@ -783,6 +888,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         st.error(f"Projection calc error (main or site-level): {e}"); st.exception(e)
         return default_return_tuple[0], avg_actual_lag_days_for_display if pd.notna(avg_actual_lag_days_for_display) else 30.0, "Error", "Error", pd.DataFrame(), f"Error: {e}"
 
+
 # --- MODIFIED: AI Forecast Core Function with Site Activation/Deactivation ---
 def calculate_ai_forecast_core(
     goal_lpi_date_dt_orig: datetime, goal_icf_number_orig: int, estimated_cpql_user: float,
@@ -893,7 +999,6 @@ def calculate_ai_forecast_core(
     if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
     site_level_monthly_qlof = {}
-    # Get all unique sites from site_metrics_df if available, otherwise it's an empty array
     all_defined_sites = site_metrics_df['Site'].unique() if not site_metrics_df.empty and 'Site' in site_metrics_df else np.array([])
 
     hist_site_pof_prop_overall = pd.Series(dtype=float)
@@ -913,30 +1018,23 @@ def calculate_ai_forecast_core(
         for gen_month in valid_generation_months_for_planning:
             if icfs_still_to_assign_globally <= 1e-9: break
 
-            # --- NEW: Determine active sites for this generation month ---
+            # --- Determine active sites for this generation month ---
             active_sites_this_gen_month = []
-            if all_defined_sites.size > 0: # Only if there are sites to begin with
+            if all_defined_sites.size > 0:
                 for site_name_iter in all_defined_sites:
                     is_active_for_month = True
                     if site_activity_schedule and site_name_iter in site_activity_schedule:
                         activity_info = site_activity_schedule[site_name_iter]
                         activation_pd = activity_info.get('activation_period')
                         deactivation_pd = activity_info.get('deactivation_period')
-                        if activation_pd and gen_month < activation_pd:
-                            is_active_for_month = False
-                        if deactivation_pd and gen_month > deactivation_pd:
-                            is_active_for_month = False
-                    if is_active_for_month:
-                        active_sites_this_gen_month.append(site_name_iter)
+                        if activation_pd and gen_month < activation_pd: is_active_for_month = False
+                        if deactivation_pd and gen_month > deactivation_pd: is_active_for_month = False
+                    if is_active_for_month: active_sites_this_gen_month.append(site_name_iter)
             
-            # Filter historical proportions and redistribution scores for active sites this month
             hist_site_pof_prop_active = hist_site_pof_prop_overall[hist_site_pof_prop_overall.index.isin(active_sites_this_gen_month)]
-            if not hist_site_pof_prop_active.empty and hist_site_pof_prop_active.sum() > 1e-9 : # Renormalize if some sites became inactive
+            if not hist_site_pof_prop_active.empty and hist_site_pof_prop_active.sum() > 1e-9 :
                  hist_site_pof_prop_active = hist_site_pof_prop_active / hist_site_pof_prop_active.sum()
-            else: # if sum is zero or empty (e.g. all sites with historical data are now inactive)
-                 hist_site_pof_prop_active = pd.Series(dtype=float)
-
-
+            else: hist_site_pof_prop_active = pd.Series(dtype=float)
             site_redist_scores_active = {s: score for s, score in site_redistribution_scores_overall.items() if s in active_sites_this_gen_month}
 
             qls_theoretically_needed_for_remaining_float = (icfs_still_to_assign_globally / overall_pof_to_icf_rate) if overall_pof_to_icf_rate > 1e-9 else float('inf')
@@ -950,18 +1048,17 @@ def calculate_ai_forecast_core(
             else: current_month_initial_ql_target = round(max(0, ql_target_potential_this_month_heuristic_limited))
 
             ai_gen_df.loc[gen_month, 'Required_QLs_POF_Initial'] = current_month_initial_ql_target
-            site_ql_allocations_month_specific = {site: 0 for site in active_sites_this_gen_month} # Initialize for active sites
+            site_ql_allocations_month_specific = {site: 0 for site in active_sites_this_gen_month}
             unallocatable_this_month = 0
 
-            if current_month_initial_ql_target > 0 and active_sites_this_gen_month: # Only proceed if QLs to assign AND active sites exist
+            if current_month_initial_ql_target > 0 and active_sites_this_gen_month:
                 temp_site_allocations_float = {}
-                if not hist_site_pof_prop_active.empty: # Use active site proportions
+                if not hist_site_pof_prop_active.empty:
                     for site_n_dist, prop_dist in hist_site_pof_prop_active.items():
                         temp_site_allocations_float[site_n_dist] = current_month_initial_ql_target * prop_dist
-                else: # Fallback to equal distribution among active sites
+                else:
                     ql_per_site_fallback_float = current_month_initial_ql_target / len(active_sites_this_gen_month)
                     for site_n_dist in active_sites_this_gen_month: temp_site_allocations_float[site_n_dist] = ql_per_site_fallback_float
-
                 for site_n_round, ql_float_round in temp_site_allocations_float.items():
                     site_ql_allocations_month_specific[site_n_round] = round(ql_float_round)
                 current_sum_ql_after_initial_round = sum(site_ql_allocations_month_specific.values())
@@ -970,16 +1067,15 @@ def calculate_ai_forecast_core(
                     target_site_for_diff_adj = active_sites_this_gen_month[0]
                     if temp_site_allocations_float:
                          target_site_for_diff_adj = max(temp_site_allocations_float, key=temp_site_allocations_float.get, default=active_sites_this_gen_month[0])
-                    elif site_redist_scores_active: # Use active site scores for tie-breaking
+                    elif site_redist_scores_active:
                          best_site_cand_adj = max(site_redist_scores_active, key=site_redist_scores_active.get, default=None)
                          if best_site_cand_adj: target_site_for_diff_adj = best_site_cand_adj
                     site_ql_allocations_month_specific[target_site_for_diff_adj] += diff_ql_rounding_adj
-
                 max_iterations_site_cap_loop = 10
                 for iteration_cap_loop in range(max_iterations_site_cap_loop):
                     excess_ql_pool_iter_val = 0; newly_capped_this_iter_val = False
-                    for site_n_iter_cap, allocated_qls_iter_cap in list(site_ql_allocations_month_specific.items()): # Iterate on copy for modification
-                        if site_n_iter_cap not in active_sites_this_gen_month: continue # Should not happen if initialized correctly
+                    for site_n_iter_cap, allocated_qls_iter_cap in list(site_ql_allocations_month_specific.items()):
+                        if site_n_iter_cap not in active_sites_this_gen_month: continue
                         site_cap_val_iter = site_caps_input.get(site_n_iter_cap, float('inf'))
                         if allocated_qls_iter_cap > site_cap_val_iter:
                             diff_iter_cap = allocated_qls_iter_cap - site_cap_val_iter
@@ -987,7 +1083,6 @@ def calculate_ai_forecast_core(
                             site_ql_allocations_month_specific[site_n_iter_cap] = site_cap_val_iter
                             newly_capped_this_iter_val = True
                     if excess_ql_pool_iter_val < 1: break
-                    # Candidate sites for redistribution are active AND not yet at their cap
                     candidate_sites_for_rd_list = {s: score for s, score in site_redist_scores_active.items() if s in site_ql_allocations_month_specific and site_ql_allocations_month_specific[s] < site_caps_input.get(s, float('inf'))}
                     if not candidate_sites_for_rd_list: unallocatable_this_month += round(excess_ql_pool_iter_val); break
                     total_score_candidates_rd = sum(candidate_sites_for_rd_list.values())
@@ -1008,7 +1103,7 @@ def calculate_ai_forecast_core(
                         break
                     if iteration_cap_loop == max_iterations_site_cap_loop - 1 and excess_ql_pool_iter_val >=1 :
                         unallocatable_this_month += round(excess_ql_pool_iter_val)
-            elif current_month_initial_ql_target > 0 and not active_sites_this_gen_month: # QLs to assign but no active sites
+            elif current_month_initial_ql_target > 0 and not active_sites_this_gen_month:
                  unallocatable_this_month = current_month_initial_ql_target
 
             sum_actually_allocated_qls_final = sum(site_ql_allocations_month_specific.values())
@@ -1018,20 +1113,14 @@ def calculate_ai_forecast_core(
             icfs_generated_this_month_float = sum_actually_allocated_qls_final * overall_pof_to_icf_rate
             ai_gen_df.loc[gen_month, 'Generated_ICF_Mean'] = icfs_generated_this_month_float
             icfs_still_to_assign_globally -= icfs_generated_this_month_float
-    else: # No valid generation months for planning
-        # ... (existing code for no valid generation months) ...
+    else:
         if run_mode == "primary" and 'st' in globals() and hasattr(st, 'sidebar'):
-            st.sidebar.error("Primary run: No valid generation months for planning (LPI likely too soon or projection too short).")
+            st.sidebar.error("Primary run: No valid generation months for planning.")
         if icfs_still_to_assign_globally > 1e-9:
             first_possible_landing_month_check_no_gen = proj_start_month_period + avg_lag_months_approx
-            feasibility_details_no_gen = f"Goal LPI ({current_goal_lpi_month_period.strftime('%Y-%m')}) combined with lag ({effective_lag_for_planning_approx:.1f} days) results in no valid QL generation months within the projection window. Minimum landing month for first QLs: {first_possible_landing_month_check_no_gen.strftime('%Y-%m')}."
-            if current_goal_lpi_month_period < first_possible_landing_month_check_no_gen:
-                 feasibility_details_no_gen = f"Goal LPI ({current_goal_lpi_month_period.strftime('%Y-%m')}) is too soon. Minimum landing month: {first_possible_landing_month_check_no_gen.strftime('%Y-%m')} (Lag: {effective_lag_for_planning_approx:.1f} days)."
-            ai_results_df_empty = pd.DataFrame(index=projection_calc_months)
-            ai_results_df_empty['Projected_ICF_Landed'] = 0; ai_results_df_empty['Cumulative_ICF_Landed'] = 0
-            ai_results_df_empty['Target_QLs_POF'] = 0; ai_results_df_empty['Implied_Ad_Spend'] = 0
+            feasibility_details_no_gen = f"Goal LPI ({current_goal_lpi_month_period.strftime('%Y-%m')}) combined with lag ({effective_lag_for_planning_approx:.1f} days) results in no valid QL generation months. Min. landing: {first_possible_landing_month_check_no_gen.strftime('%Y-%m')}."
+            ai_results_df_empty = pd.DataFrame(index=projection_calc_months); ai_results_df_empty['Projected_ICF_Landed'] = 0; ai_results_df_empty['Cumulative_ICF_Landed'] = 0; ai_results_df_empty['Target_QLs_POF'] = 0; ai_results_df_empty['Implied_Ad_Spend'] = 0
             return ai_results_df_empty, pd.DataFrame(), "N/A", feasibility_details_no_gen, True, 0
-
 
     total_generated_icfs_float = ai_gen_df['Generated_ICF_Mean'].sum()
     generation_goal_met_or_exceeded_in_float = (total_generated_icfs_float >= (current_goal_icf_number - 0.01))
@@ -1120,8 +1209,8 @@ def calculate_ai_forecast_core(
         else: ads_off_date_str_calc_val = ads_off_month_period_val_calc.start_time.strftime('%Y-%m-%d')
 
     ai_site_proj_df = pd.DataFrame()
-    if all_defined_sites.size > 0: # Check against all_defined_sites which come from site_metrics_df
-        site_data_coll_ai_final_val = {site: {} for site in all_defined_sites} # Use all_defined_sites
+    if all_defined_sites.size > 0:
+        site_data_coll_ai_final_val = {site: {} for site in all_defined_sites}
         for site_n_final_init_val in all_defined_sites:
             for month_p_final_init_val in projection_calc_months:
                 month_str_final_init_val = month_p_final_init_val.strftime('%Y-%m')
@@ -1129,8 +1218,7 @@ def calculate_ai_forecast_core(
                 site_data_coll_ai_final_val[site_n_final_init_val][(month_str_final_init_val, 'Projected ICFs Landed')] = 0.0
         for gen_month_site_idx_val in ai_gen_df.index:
             qlof_for_month_val = site_level_monthly_qlof.get(gen_month_site_idx_val, {})
-            # Determine active sites for this specific generation month again for site-level ICF calculation
-            active_sites_for_this_gen_month_for_icf_calc = []
+            active_sites_for_this_gen_month_for_icf_calc = [] 
             for site_name_check_icf in all_defined_sites:
                 is_active_for_month_icf = True
                 if site_activity_schedule and site_name_check_icf in site_activity_schedule:
@@ -1140,8 +1228,8 @@ def calculate_ai_forecast_core(
                     if act_pd_icf and gen_month_site_idx_val < act_pd_icf: is_active_for_month_icf = False
                     if deact_pd_icf and gen_month_site_idx_val > deact_pd_icf: is_active_for_month_icf = False
                 if is_active_for_month_icf: active_sites_for_this_gen_month_for_icf_calc.append(site_name_check_icf)
-            
-            for site_n_final_val in active_sites_for_this_gen_month_for_icf_calc: # Iterate only over active sites for ICF gen
+
+            for site_n_final_val in active_sites_for_this_gen_month_for_icf_calc:
                 qls_for_site_this_gen_month_val = round(qlof_for_month_val.get(site_n_final_val, 0))
                 site_data_coll_ai_final_val[site_n_final_val][(gen_month_site_idx_val.strftime('%Y-%m'), 'Projected QLs (POF)')] = qls_for_site_this_gen_month_val
                 site_perf_r_final_val = site_metrics_df[site_metrics_df['Site'] == site_n_final_val] if not site_metrics_df.empty else pd.DataFrame()
@@ -1151,13 +1239,11 @@ def calculate_ai_forecast_core(
                     if pd.notna(rate_val_site) and rate_val_site >= 0: site_pof_icf_rate_final_val = rate_val_site
                 site_gen_icfs_this_gen_month_float = qls_for_site_this_gen_month_val * site_pof_icf_rate_final_val
                 if site_gen_icfs_this_gen_month_float > 0:
-                    # Use the chosen lag method for site-level ICF landing
                     lag_days_to_use_for_site_smear = [avg_overall_lag_days]
                     proportions_for_site_smear = [1.0]
                     if ai_lag_method == "percentiles":
                         lag_days_to_use_for_site_smear = [ai_lag_p25_days, ai_lag_p50_days, ai_lag_p75_days]
                         proportions_for_site_smear = [0.25, 0.50, 0.25]
-
                     for i_site_smear, lag_d_site_smear in enumerate(lag_days_to_use_for_site_smear):
                         icf_s_share_smear = site_gen_icfs_this_gen_month_float * proportions_for_site_smear[i_site_smear]
                         if icf_s_share_smear <=0: continue
@@ -1222,7 +1308,7 @@ def calculate_ai_forecast_core(
         base_unfeasible_msg_for_else = f"{goal_desc_for_msg} "
         constraint_msgs_list = []
         hard_constraints_hit_flag = False
-        if total_unallocated_qls_run > 0: constraint_msgs_list.append(f"{total_unallocated_qls_run:.0f} QLs unallocatable (site caps/activity)."); hard_constraints_hit_flag = True # Updated msg
+        if total_unallocated_qls_run > 0: constraint_msgs_list.append(f"{total_unallocated_qls_run:.0f} QLs unallocatable (site caps/activity)."); hard_constraints_hit_flag = True
         if significant_icfs_still_to_assign_from_gen_planning: constraint_msgs_list.append(f"{icfs_still_to_assign_globally:.1f} ICFs (target: {effective_icf_goal_for_run_msg}) could not be fully planned in generation phase."); hard_constraints_hit_flag = True
         if hard_constraints_hit_flag: detailed_outcome_message = base_unfeasible_msg_for_else + "appear UNFEASIBLE due to planning constraints: " + " ".join(constraint_msgs_list)
         elif not goal_met_on_time_this_run:
@@ -1304,16 +1390,20 @@ with st.sidebar:
             elif not month_str and pd.notna(spend_val): st.sidebar.warning(f"Row {index+1} in historical spend has amount but no month. Ignoring.");
         if valid_hist_spend_entries: ad_spend_input_dict = temp_ad_spend_input_dict; st.session_state.historical_spend_df = edited_historical_spend_df
     st.divider()
-    with st.expander("Site Scoring Weights"):
+    with st.expander("Performance Scoring Weights"): # Renamed for generality
         weights_input_local = {}
         weights_input_local["Qual -> ICF %"] = st.slider("Qual (POF) -> ICF %", 0, 100, 20, key='w_qicf_v2')
-        weights_input_local["Avg TTC (Days)"] = st.slider("Avg Time to Contact", 0, 100, 25, key='w_ttc_v2')
-        weights_input_local["Avg Funnel Movement Steps"] = st.slider("Avg Funnel Movement Steps", 0, 100, 5, key='w_fms_v2')
-        weights_input_local["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr_v2')
+        weights_input_local["Avg TTC (Days)"] = st.slider("Avg Time to Contact", 0, 100, 25, key='w_ttc_v2', help="Note: This metric is more relevant for Site Performance.")
+        weights_input_local["Avg Funnel Movement Steps"] = st.slider("Avg Funnel Movement Steps", 0, 100, 5, key='w_fms_v2', help="Note: This metric is more relevant for Site Performance.")
+        # Site Screen Fail % is now Screen Fail % (from ICF)
+        weights_input_local["Screen Fail % (from ICF)"] = st.slider("Screen Fail % (from ICF)", 0, 100, 5, key='w_sfr_v3') # Updated key and name
         weights_input_local["StS -> Appt %"] = st.slider("StS -> Appt Sched %", 0, 100, 30, key='w_sa_site_score_v2')
         weights_input_local["Appt -> ICF %"] = st.slider("Appt Sched -> ICF %", 0, 100, 15, key='w_ai_site_score_v2')
         weights_input_local["Lag Qual -> ICF (Days)"] = st.slider("Lag Qual (POF) -> ICF (Days)", 0, 100, 0, key='w_lagqicf_v2')
-        weights_input_local["Site Projection Lag (Days)"] = st.slider("Site Projection Lag (Days)", 0, 100, 0, key='w_siteprojlag_v2', help="Sum of average lags for key funnel segments specific to this site; used in site-level ICF landing projections.")
+        # Generic "Projection Lag" vs "Site Projection Lag"
+        weights_input_local["Projection Lag (Days)"] = st.slider("Overall Projection Lag (Days)", 0, 100, 0, key='w_projlag_v3', help="Sum of average lags for key funnel segments; used for Ad Performance.")
+        weights_input_local["Site Projection Lag (Days)"] = st.slider("Site Projection Lag (Days)", 0, 100, 0, key='w_siteprojlag_v2', help="Used for Site Performance if different from overall.")
+
         total_weight_input_local = sum(abs(w) for w in weights_input_local.values())
         if total_weight_input_local > 0: weights_normalized = {k: v / total_weight_input_local for k, v in weights_input_local.items()}
         else: weights_normalized = {k: 0 for k in weights_input_local}
@@ -1438,9 +1528,19 @@ if st.session_state.data_processed_successfully:
     site_metrics_calculated_data = st.session_state.get('site_metrics_calculated', pd.DataFrame())
     if "success_message_shown" not in st.session_state and referral_data_processed is not None:
         st.success("Data loaded and preprocessed successfully!"); st.session_state.success_message_shown = True
-    st.markdown("---"); tab1, tab2, tab3, tab_ai = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections", "🤖 AI Forecast"])
+    
+    # UPDATED TABS
+    tab_titles = ["📅 Monthly ProForma", "🏆 Site Performance", "📢 Ad Performance", "📈 Projections", "🤖 AI Forecast"]
+    tabs = st.tabs(tab_titles)
 
-    with tab1:
+    tab_proforma = tabs[0]
+    tab_site_perf = tabs[1]
+    tab_ad_perf = tabs[2] # New Ad Performance Tab
+    tab_projections = tabs[3]
+    tab_ai_forecast = tabs[4]
+
+
+    with tab_proforma: 
         st.header("Monthly ProForma (Historical Cohorts)")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and ad_spend_input_dict:
             proforma_df_tab1 = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict)
@@ -1453,10 +1553,10 @@ if st.session_state.data_processed_successfully:
             else: st.warning("Could not generate ProForma table (check historical ad spend for relevant months).")
         else: st.warning("ProForma cannot be calculated until data is loaded and historical ad spend is entered.")
 
-    with tab2:
+    with tab_site_perf: 
         st.header("Site Performance Ranking")
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized and not site_metrics_calculated_data.empty:
-            ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized)
+            ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized) # Uses the original score_sites for now
             st.subheader("Site Ranking")
             display_cols_sites_tab2 = ['Site', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
                                    'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
@@ -1479,7 +1579,107 @@ if st.session_state.data_processed_successfully:
         elif site_metrics_calculated_data.empty: st.warning("Site metrics have not been calculated (e.g. no 'Site' column in data or error during calculation). Site performance cannot be shown.")
         else: st.warning("Site performance cannot be ranked until data is loaded and weights are set.")
 
-    with tab3:
+    # --- NEW AD PERFORMANCE TAB ---
+    with tab_ad_perf:
+        st.header("📢 Ad Channel Performance")
+        st.caption("Performance metrics grouped by UTM parameters, scored using the same weights as Site Performance.")
+
+        if not st.session_state.data_processed_successfully or referral_data_processed is None or referral_data_processed.empty:
+            st.warning("Please upload and process referral data first.")
+        elif "UTM Source" not in referral_data_processed.columns: # Check if essential UTM col exists
+            st.warning("UTM Source column not found in the uploaded data. Ad Performance cannot be calculated.")
+        else:
+            df_for_ad_perf = referral_data_processed.copy()
+            # Ensure UTM Medium exists for combined analysis, fill with placeholder if not
+            if "UTM Medium" not in df_for_ad_perf.columns:
+                df_for_ad_perf["UTM Medium"] = "N/A" # Or "Unspecified"
+
+            st.subheader("Performance by UTM Source")
+            utm_source_metrics_df = calculate_grouped_performance_metrics(
+                df_for_ad_perf, ordered_stages, ts_col_map,
+                grouping_cols=["UTM Source"], 
+                unclassified_label="Unclassified Source"
+            )
+
+            if not utm_source_metrics_df.empty:
+                # The grouping_key_for_df inside calculate_grouped_performance_metrics becomes "UTM Source_Cleaned"
+                ranked_utm_source_df = score_performance_groups(
+                    utm_source_metrics_df, weights_normalized,
+                    group_col_name="UTM Source_Cleaned" 
+                )
+                # Rename for display
+                if "UTM Source_Cleaned" in ranked_utm_source_df.columns:
+                    ranked_utm_source_df.rename(columns={"UTM Source_Cleaned": "UTM Source"}, inplace=True)
+
+                display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
+                                   'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
+                                   'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
+                                   'Avg TTC (Days)', 'Avg Funnel Movement Steps'] 
+                
+                display_cols_ad_exist = [col for col in display_cols_ad if col in ranked_utm_source_df.columns]
+                final_ad_display = ranked_utm_source_df[display_cols_ad_exist].copy()
+
+                if not final_ad_display.empty:
+                    if 'Score' in final_ad_display.columns: final_ad_display['Score'] = final_ad_display['Score'].round(1)
+                    for col_fmt in final_ad_display.columns:
+                        if '%' in col_fmt and final_ad_display[col_fmt].dtype == 'float':
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
+                        elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_display[col_fmt].dtype == 'float':
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+                        elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_display[col_fmt]):
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
+                    st.dataframe(final_ad_display.style.format(na_rep='-'))
+                    try:
+                        csv_ad_source = final_ad_display.to_csv(index=False).encode('utf-8')
+                        st.download_button(label="Download UTM Source Performance", data=csv_ad_source, file_name='utm_source_performance.csv', mime='text/csv', key='dl_ad_source_perf_v2')
+                    except Exception as e_dl_ads: st.warning(f"UTM Source performance download error: {e_dl_ads}")
+                else: st.info("No data to display for UTM Source performance after processing.")
+            else: st.info("Could not calculate performance metrics for UTM Source.")
+
+            st.markdown("---")
+            st.subheader("Performance by UTM Source / UTM Medium")
+            utm_combo_metrics_df = calculate_grouped_performance_metrics(
+                df_for_ad_perf, ordered_stages, ts_col_map,
+                grouping_cols=["UTM Source", "UTM Medium"],
+                unclassified_label="Unclassified"
+            )
+
+            if not utm_combo_metrics_df.empty:
+                # Group col name will be "Combined_Group_Key"
+                ranked_utm_combo_df = score_performance_groups(
+                    utm_combo_metrics_df, weights_normalized,
+                    group_col_name="Combined_Group_Key"
+                )
+                if "Combined_Group_Key" in ranked_utm_combo_df.columns:
+                    ranked_utm_combo_df.rename(columns={"Combined_Group_Key": "UTM Source / Medium"}, inplace=True)
+
+                display_cols_ad_combo = ['UTM Source / Medium', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
+                                   'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
+                                   'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
+                                   'Avg TTC (Days)', 'Avg Funnel Movement Steps']
+                
+                display_cols_ad_combo_exist = [col for col in display_cols_ad_combo if col in ranked_utm_combo_df.columns]
+                final_ad_combo_display = ranked_utm_combo_df[display_cols_ad_combo_exist].copy()
+
+                if not final_ad_combo_display.empty:
+                    if 'Score' in final_ad_combo_display.columns: final_ad_combo_display['Score'] = final_ad_combo_display['Score'].round(1)
+                    for col_fmt in final_ad_combo_display.columns: 
+                        if '%' in col_fmt and final_ad_combo_display[col_fmt].dtype == 'float':
+                            final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
+                        elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_combo_display[col_fmt].dtype == 'float':
+                            final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+                        elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_combo_display[col_fmt]):
+                             final_ad_combo_display[col_fmt] = final_ad_combo_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
+                    st.dataframe(final_ad_combo_display.style.format(na_rep='-'))
+                    try:
+                        csv_ad_combo = final_ad_combo_display.to_csv(index=False).encode('utf-8')
+                        st.download_button(label="Download UTM Source/Medium Performance", data=csv_ad_combo, file_name='utm_combo_performance.csv', mime='text/csv', key='dl_ad_combo_perf_v2')
+                    except Exception as e_dl_adc: st.warning(f"UTM Combo performance download error: {e_dl_adc}")
+                else: st.info("No data to display for UTM Source / Medium performance after processing.")
+            else: st.info("Could not calculate performance metrics for UTM Source / Medium combination.")
+
+
+    with tab_projections: 
         st.header("Projections (Based on Future Spend)")
         effective_proj_rates_tab3, method_desc_tab3 = determine_effective_projection_rates(
             referral_data_processed, ordered_stages, ts_col_map, rate_assumption_method_sidebar,
@@ -1602,7 +1802,7 @@ if st.session_state.data_processed_successfully:
             except Exception as e_dl_site3: st.warning(f"Site projection (Tab 3) download error: {e_dl_site3}")
         else: st.info("Site-level projection data (Projections Tab) is not available or is empty.")
 
-    with tab_ai:
+    with tab_ai_forecast:
         st.header("🤖 AI Forecast (Goal-Based)")
         st.info("""
         Define your recruitment goals. The tool will estimate a monthly plan using a 'frontloading' strategy
@@ -1638,8 +1838,9 @@ if st.session_state.data_processed_successfully:
             with lag_cols[0]: ai_lag_p25_days_input = st.number_input("P25 Lag (Days)", min_value=0, value=20, step=1, key="ai_lag_p25_v1")
             with lag_cols[1]: ai_lag_p50_days_input = st.number_input("P50 (Median) Lag (Days)", min_value=0, value=30, step=1, key="ai_lag_p50_v1")
             with lag_cols[2]: ai_lag_p75_days_input = st.number_input("P75 Lag (Days)", min_value=0, value=45, step=1, key="ai_lag_p75_v1")
-            if not (ai_lag_p25_days_input <= ai_lag_p50_days_input <= ai_lag_p75_days_input):
-                st.warning("P25 lag should be <= P50, and P50 should be <= P75 for logical distribution.")
+            if ai_lag_p25_days_input is not None and ai_lag_p50_days_input is not None and ai_lag_p75_days_input is not None: 
+                if not (ai_lag_p25_days_input <= ai_lag_p50_days_input <= ai_lag_p75_days_input):
+                    st.warning("P25 lag should be <= P50, and P50 should be <= P75 for logical distribution.")
 
         rate_options_ai_display = {"Manual Input Below": "Manual Input Below", "Overall Historical Average": "Overall Historical", "1-Month Rolling Avg.": "1-Month Rolling", "3-Month Rolling Avg.": "3-Month Rolling", "6-Month Rolling Avg.": "6-Month Rolling"}
         selected_rate_method_label_ai_tab = st.radio("Base AI Forecast Conversion Rates On:", options=list(rate_options_ai_display.keys()), index=4, key="ai_rate_method_radio_v3", horizontal=True)
@@ -1664,28 +1865,28 @@ if st.session_state.data_processed_successfully:
 
         st.subheader("Site Activation/Deactivation Dates (Optional)")
         st.caption("Define when sites are active for QL allocation. Leave dates blank if active for the entire projection. Dates must be in YYYY-MM format.")
-        default_site_activity_schedule_input = {}
+        default_site_activity_schedule_input = {} 
         site_activity_editor_data_list = []
 
         if not site_metrics_calculated_data.empty and 'Site' in site_metrics_calculated_data.columns:
             for site_name_act_iter in site_metrics_calculated_data['Site'].unique():
                 site_activity_editor_data_list.append({
                     "Site": site_name_act_iter,
-                    "Activation Date (YYYY-MM)": None,
-                    "Deactivation Date (YYYY-MM)": None
+                    "Activation Date (YYYY-MM)": None, 
+                    "Deactivation Date (YYYY-MM)": None 
                 })
 
             if site_activity_editor_data_list:
                 edited_site_activity_df = st.data_editor(
                     pd.DataFrame(site_activity_editor_data_list),
-                    key="ai_site_activity_editor_v1",
+                    key="ai_site_activity_editor_v1", 
                     use_container_width=True,
                     column_config={
                         "Site": st.column_config.TextColumn(disabled=True),
                         "Activation Date (YYYY-MM)": st.column_config.TextColumn(help="YYYY-MM or leave blank if active from start."),
                         "Deactivation Date (YYYY-MM)": st.column_config.TextColumn(help="YYYY-MM or leave blank if active till end.")
                     },
-                    num_rows="dynamic"
+                    num_rows="dynamic" 
                 )
 
                 if edited_site_activity_df is not None:
@@ -1712,7 +1913,7 @@ if st.session_state.data_processed_successfully:
                 st.caption("No site data (from 'Site Metrics') available to define activity dates.")
         else:
             st.caption("Site metrics not calculated. Upload data and ensure 'Site' column exists to define activity dates.")
-
+        
         st.markdown("---"); st.subheader("Site-Specific Monthly QL (POF) Caps (Optional)")
         default_site_caps_ai_input_val = {}
         if not site_metrics_calculated_data.empty and 'Site' in site_metrics_calculated_data.columns and referral_data_processed is not None:
@@ -1779,7 +1980,7 @@ if st.session_state.data_processed_successfully:
                     current_p25 = float(ai_lag_p25_days_input); current_p50 = float(ai_lag_p50_days_input); current_p75 = float(ai_lag_p75_days_input)
                     lag_source_message_ai_val = f"P25/P50/P75 lags: {current_p25:.1f}/{current_p50:.1f}/{current_p75:.1f} days."
                 else:
-                    st.warning("Invalid P25/P50/P75 inputs. Defaulting to Overall Average POF->ICF Lag.")
+                    st.warning("Invalid P25/P50/P75 inputs or order. Defaulting to Overall Average POF->ICF Lag.")
                     if pd.notna(avg_pof_icf_lag_ai_val): lag_source_message_ai_val = f"Using fallback historical POF-ICF lag: {avg_pof_icf_lag_ai_val:.1f} days."
                     else: avg_pof_icf_lag_ai_val = 30.0; lag_source_message_ai_val = f"Using fallback default lag: {avg_pof_icf_lag_ai_val:.1f} days."
             else:
@@ -1802,7 +2003,7 @@ if st.session_state.data_processed_successfully:
                     avg_overall_lag_days=avg_pof_icf_lag_ai_val,
                     site_metrics_df=site_metrics_calculated_data, projection_horizon_months=proj_horizon_sidebar,
                     site_caps_input=default_site_caps_ai_input_val,
-                    site_activity_schedule=default_site_activity_schedule_input, # NEW
+                    site_activity_schedule=default_site_activity_schedule_input, # Pass the new schedule
                     site_scoring_weights_for_ai=weights_normalized,
                     cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                     run_mode=run_mode_for_call_primary_val,
@@ -1812,7 +2013,6 @@ if st.session_state.data_processed_successfully:
                     ai_lag_p50_days=current_p50,
                     ai_lag_p75_days=current_p75
                 )
-                # --- CONTINUATION OF AI TAB DISPLAY LOGIC ---
                 if 'st' in globals() and hasattr(st, 'sidebar') and hasattr(st.session_state, 'ai_gen_df_debug_primary'):
                     st.sidebar.subheader("Debug: Primary Run After-Calc")
                     st.sidebar.markdown(f"**Message (Primary):** `{ai_message_run1}`")
@@ -1920,14 +2120,13 @@ if st.session_state.data_processed_successfully:
                                      else (f"${row_cpicf['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row_cpicf['Projected_CPICF_Cohort_Source_Mean']) else "-"))
                                     if proj_icf_variation_percent_sidebar > 0 else (f"${row_cpicf['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row_cpicf['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
                     cols_to_show_ai_res_list.append('Projected CPICF (Low-Mean-High)')
-                # --- CONTINUATION OF THE AI TAB DISPLAY LOGIC ---
                 elif 'Projected_CPICF_Cohort_Source_Mean' in ai_display_df_res_fmt.columns:
                      ai_display_df_res_fmt.rename(columns={'Projected_CPICF_Cohort_Source_Mean':'Projected CPICF (Mean)'}, inplace=True)
                      ai_display_df_res_fmt['Projected CPICF (Mean)'] = ai_display_df_res_fmt['Projected CPICF (Mean)'].apply(lambda x_cpicf: f"${x_cpicf:,.2f}" if pd.notna(x_cpicf) else '-')
                      cols_to_show_ai_res_list.append('Projected CPICF (Mean)')
 
                 ai_display_df_filtered_res_fmt = ai_display_df_res_fmt[[col for col in cols_to_show_ai_res_list if col in ai_display_df_res_fmt.columns]].copy()
-                for col_n_ai_res_fmt in ai_display_df_filtered_res_fmt.columns: # Formatting for display
+                for col_n_ai_res_fmt in ai_display_df_filtered_res_fmt.columns:
                     if 'Ad_Spend' in col_n_ai_res_fmt : ai_display_df_filtered_res_fmt[col_n_ai_res_fmt] = ai_display_df_filtered_res_fmt[col_n_ai_res_fmt].apply(lambda x_fmt: f"${x_fmt:,.2f}" if isinstance(x_fmt, (int,float)) and pd.notna(x_fmt) else (x_fmt if isinstance(x_fmt,str) else '-'))
                     elif 'Planned QLs (POF)' in col_n_ai_res_fmt or 'ICF_Landed' in col_n_ai_res_fmt: ai_display_df_filtered_res_fmt[col_n_ai_res_fmt] = ai_display_df_filtered_res_fmt[col_n_ai_res_fmt].apply(lambda x_fmt: f"{int(x_fmt):,}" if pd.notna(x_fmt) and isinstance(x_fmt,(int,float)) and x_fmt==x_fmt else (x_fmt if isinstance(x_fmt,str) else '-'))
                 st.dataframe(ai_display_df_filtered_res_fmt.style.format(na_rep='-'))
@@ -1940,30 +2139,29 @@ if st.session_state.data_processed_successfully:
                     if isinstance(ai_chart_data_res_val.index, pd.PeriodIndex): ai_chart_data_res_val.index = ai_chart_data_res_val.index.to_timestamp()
                     ai_chart_data_res_val['Projected_ICF_Landed'] = pd.to_numeric(ai_chart_data_res_val['Projected_ICF_Landed'], errors='coerce').fillna(0)
                     st.line_chart(ai_chart_data_res_val)
-            elif ai_message_display and "Not Calculated" not in ai_message_display and "Missing critical base data" not in ai_message_display : # Only show if calc was attempted but no table
+            elif ai_message_display and "Not Calculated" not in ai_message_display and "Missing critical base data" not in ai_message_display : 
                 st.info(f"AI Forecast calculation did not produce a monthly performance table. Status: {ai_message_display}")
 
             if ai_site_df_display is not None and not ai_site_df_display.empty:
                 st.subheader("AI Forecasted Site-Level Performance")
                 ai_site_df_displayable_res_fmt = ai_site_df_display.copy()
-                # Ensure 'Site' is index for display if it's a column and not already index
                 if ai_site_df_displayable_res_fmt.index.name != 'Site' and 'Site' in ai_site_df_displayable_res_fmt.columns: ai_site_df_displayable_res_fmt.set_index('Site', inplace=True)
-                elif ai_site_df_displayable_res_fmt.index.name != 'Site' and 'Site' not in ai_site_df_displayable_res_fmt.columns and "Grand Total" in ai_site_df_displayable_res_fmt.index : ai_site_df_displayable_res_fmt.index.name = 'Site' # Assign if it's the Grand Total index
+                elif ai_site_df_displayable_res_fmt.index.name != 'Site' and 'Site' not in ai_site_df_displayable_res_fmt.columns and "Grand Total" in ai_site_df_displayable_res_fmt.index : ai_site_df_displayable_res_fmt.index.name = 'Site'
 
                 formatted_site_df_ai_res_val = ai_site_df_displayable_res_fmt.copy()
-                if isinstance(formatted_site_df_ai_res_val.columns, pd.MultiIndex): # Flatten MultiIndex for display
+                if isinstance(formatted_site_df_ai_res_val.columns, pd.MultiIndex):
                     new_cols_site_ai = []
                     for col_tuple_site_ai in formatted_site_df_ai_res_val.columns:
-                        if isinstance(col_tuple_site_ai, tuple) and len(col_tuple_site_ai) == 2: new_cols_site_ai.append(f"{str(col_tuple_site_ai[1])} ({str(col_tuple_site_ai[0])})") # Metric (Month)
+                        if isinstance(col_tuple_site_ai, tuple) and len(col_tuple_site_ai) == 2: new_cols_site_ai.append(f"{str(col_tuple_site_ai[1])} ({str(col_tuple_site_ai[0])})")
                         else: new_cols_site_ai.append(str(col_tuple_site_ai))
                     formatted_site_df_ai_res_val.columns = new_cols_site_ai
 
-                for col_site_ai_name_res_fmt in formatted_site_df_ai_res_val.columns: # Format numbers
+                for col_site_ai_name_res_fmt in formatted_site_df_ai_res_val.columns:
                     if 'Projected QLs (POF)' in col_site_ai_name_res_fmt or 'Projected ICFs Landed' in col_site_ai_name_res_fmt:
                         try: formatted_site_df_ai_res_val[col_site_ai_name_res_fmt] = formatted_site_df_ai_res_val[col_site_ai_name_res_fmt].apply(lambda x_fmt_site: f"{int(x_fmt_site):,}" if pd.notna(x_fmt_site) and isinstance(x_fmt_site, (int, float)) and x_fmt_site==x_fmt_site else ("-" if pd.isna(x_fmt_site) else str(x_fmt_site)))
-                        except ValueError: formatted_site_df_ai_res_val[col_site_ai_name_res_fmt] = formatted_site_df_ai_res_val[col_site_ai_name_res_fmt].astype(str) # Fallback to string
+                        except ValueError: formatted_site_df_ai_res_val[col_site_ai_name_res_fmt] = formatted_site_df_ai_res_val[col_site_ai_name_res_fmt].astype(str)
                 st.dataframe(formatted_site_df_ai_res_val.style.format(na_rep='-'))
-            elif "Missing critical base data" not in ai_message_display and "Not Calculated" not in ai_message_display : # only show if calc attempted
+            elif "Missing critical base data" not in ai_message_display and "Not Calculated" not in ai_message_display :
                 st.info("Site-level AI forecast not available or sites not defined/active.")
         else:
             st.caption("Click the button above to generate the AI forecast based on your goals.")
