@@ -1340,17 +1340,20 @@ def calculate_ai_forecast_core(
 # --- END OF AI FORECAST CORE FUNCTION ---
 
 
-# --- FINAL, VERIFIED, AND ROBUST CORE FUNCTION FOR FUNNEL ANALYSIS ---
+# --- FINAL, VERIFIED, AND CORRECTED CORE FUNCTION FOR FUNNEL ANALYSIS ---
 @st.cache_data
 def calculate_pipeline_projection(
     _processed_df, ordered_stages, ts_col_map, inter_stage_lags,
     conversion_rates, lag_assumption_model
 ):
     """
-    Calculates the future ICFs and Enrollments expected from the current in-flight pipeline.
-    This version dynamically sizes the output table to prevent data truncation due to long lag times.
+    Calculates the future ICFs and Enrollments, and also returns the total theoretical yield.
     """
-    default_return = pd.DataFrame(columns=['Projected_ICF_Landed', 'Cumulative_ICF_Landed', 'Projected_Enrollments_Landed', 'Cumulative_Enrollments_Landed'])
+    default_return = {
+        'results_df': pd.DataFrame(),
+        'total_icf_yield': 0,
+        'total_enroll_yield': 0
+    }
     if _processed_df is None or _processed_df.empty:
         return default_return
 
@@ -1365,7 +1368,7 @@ def calculate_pipeline_projection(
         st.info("Funnel Analysis: No leads are currently in-flight.")
         return default_return
 
-    # --- 2. Determine Current Stage for In-Flight Leads ---
+    # --- 2. Determine Current Stage ---
     def get_current_stage(row, ordered_stages, ts_col_map):
         last_stage, last_ts = None, pd.NaT
         for stage in ordered_stages:
@@ -1383,13 +1386,9 @@ def calculate_pipeline_projection(
     # --- 3. Create the Master Pool of ALL In-Flight ICFs (Existing and Projected) ---
     all_icfs_to_project = []
     ts_icf_col = ts_col_map.get(STAGE_SIGNED_ICF)
-    
-    # Source 1: Already signed ICFs
     already_icf_in_flight = in_flight_df[in_flight_df[ts_icf_col].notna()].copy()
     for _, row in already_icf_in_flight.iterrows():
         all_icfs_to_project.append({'prob': 1.0, 'lag_to_icf': 0.0, 'start_date': row[ts_icf_col]})
-
-    # Source 2: Leads before ICF
     leads_before_icf = in_flight_df[in_flight_df[ts_icf_col].isna()].copy()
     for _, row in leads_before_icf.iterrows():
         prob_to_icf, lags_to_icf_list, path_found = 1.0, [], False
@@ -1398,8 +1397,7 @@ def calculate_pipeline_projection(
             from_stage, to_stage = ordered_stages[i], ordered_stages[i+1]
             prob_to_icf *= conversion_rates.get(f"{from_stage} -> {to_stage}", 0.0)
             lags_to_icf_list.append(inter_stage_lags.get(f"{from_stage} -> {to_stage}", 0.0))
-            if to_stage == STAGE_SIGNED_ICF:
-                path_found = True; break
+            if to_stage == STAGE_SIGNED_ICF: path_found = True; break
         if path_found and prob_to_icf > 0:
             total_lag_to_icf = np.nansum(lags_to_icf_list)
             all_icfs_to_project.append({'prob': prob_to_icf, 'lag_to_icf': total_lag_to_icf, 'start_date': row['current_stage_ts']})
@@ -1409,38 +1407,32 @@ def calculate_pipeline_projection(
     icf_to_enroll_rate = conversion_rates.get(f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}", 0.0)
     icf_to_enroll_lag = inter_stage_lags.get(f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}", 0.0)
     if pd.isna(icf_to_enroll_lag): icf_to_enroll_lag = 0.0
-
     for icf in all_icfs_to_project:
         if pd.isna(icf['start_date']) or pd.isna(icf['lag_to_icf']): continue
         icf_landing_date = icf['start_date'] + pd.to_timedelta(icf['lag_to_icf'], unit='D')
         if pd.isna(icf_landing_date): continue
         projected_enrollments.append({'prob': icf['prob'] * icf_to_enroll_rate, 'lag': icf_to_enroll_lag, 'start_date': icf_landing_date})
 
-    # --- 5. BUG FIX: Dynamically size the results dataframe ---
-    all_landing_dates = []
-    for proj in all_icfs_to_project:
-        if pd.notna(proj.get('start_date')) and pd.notna(proj.get('lag_to_icf')):
-            all_landing_dates.append(proj['start_date'] + pd.to_timedelta(proj['lag_to_icf'], unit='D'))
-    for proj in projected_enrollments:
-        if pd.notna(proj.get('start_date')) and pd.notna(proj.get('lag')):
-            all_landing_dates.append(proj['start_date'] + pd.to_timedelta(proj['lag'], unit='D'))
+    # --- 5. Calculate TOTAL THEORETICAL YIELD (the true number) ---
+    total_icf_yield = sum(p['prob'] for p in all_icfs_to_project)
+    total_enroll_yield = sum(p['prob'] for p in projected_enrollments)
 
+    # --- 6. Dynamically size the results dataframe for FUTURE projections ---
+    all_landing_dates = [p['start_date'] + pd.to_timedelta(p['lag_to_icf'], 'D') for p in all_icfs_to_project if pd.notna(p.get('start_date')) and pd.notna(p.get('lag_to_icf'))]
+    all_landing_dates.extend([p['start_date'] + pd.to_timedelta(p['lag'], 'D') for p in projected_enrollments if pd.notna(p.get('start_date')) and pd.notna(p.get('lag'))])
+    
     proj_start_month = pd.Period(datetime.now(), 'M')
-    # If there are no valid landing dates, create a default 6-month horizon
-    if not all_landing_dates:
+    valid_dates = [d for d in all_landing_dates if pd.notna(d)]
+    if not valid_dates:
         future_months = pd.period_range(start=proj_start_month, periods=6, freq='M')
     else:
-        # Find the latest possible date and create an index that includes it
-        max_date = max(dt for dt in all_landing_dates if pd.notna(dt))
-        proj_end_month = pd.Period(max_date, 'M')
-        # Ensure the start month is not after the end month
-        if proj_start_month > proj_end_month:
-            proj_end_month = proj_start_month
+        max_date = max(valid_dates)
+        proj_end_month = max(pd.Period(max_date, 'M'), proj_start_month)
         future_months = pd.period_range(start=proj_start_month, end=proj_end_month, freq='M')
-
+    
     results_df = pd.DataFrame(0.0, index=future_months, columns=['Projected_ICF_Landed', 'Projected_Enrollments_Landed'])
 
-    # --- 6. Aggregate and Smear Projections ---
+    # --- 7. Aggregate and Smear Projections into the FUTURE table ---
     def smear_projection(df, projections_list, lag_col_name, target_col):
         for proj in projections_list:
             if proj['prob'] <= 0 or pd.isna(proj['start_date']) or pd.isna(proj[lag_col_name]): continue
@@ -1453,44 +1445,33 @@ def calculate_pipeline_projection(
     results_df = smear_projection(results_df, all_icfs_to_project, 'lag_to_icf', 'Projected_ICF_Landed')
     results_df = smear_projection(results_df, projected_enrollments, 'lag', 'Projected_Enrollments_Landed')
 
-    # Final formatting
     results_df['Projected_ICF_Landed'] = results_df['Projected_ICF_Landed'].round(0).astype(int)
     results_df['Cumulative_ICF_Landed'] = results_df['Projected_ICF_Landed'].cumsum()
     results_df['Projected_Enrollments_Landed'] = results_df['Projected_Enrollments_Landed'].round(0).astype(int)
     results_df['Cumulative_Enrollments_Landed'] = results_df['Projected_Enrollments_Landed'].cumsum()
 
-    return results_df
+    return {
+        'results_df': results_df,
+        'total_icf_yield': total_icf_yield,
+        'total_enroll_yield': total_enroll_yield
+    }
 
-# --- NEW: UI TAB FOR FUNNEL ANALYSIS ---
+# --- FINAL, VERIFIED, AND CORRECTED UI TAB ---
 def render_funnel_analysis_tab():
     st.header("🔬 Funnel Analysis (Based on Current Pipeline)")
     st.info("""
-    This forecast shows the expected outcomes (**ICFs & Enrollments**) from the leads **already in your funnel**.
+    This forecast shows the expected outcomes from the leads **already in your funnel**.
     It answers the question: "If we stopped all new recruitment activities today, what results would we still see and when?"
     """)
 
+    # ... (All the st.radio and st.slider controls for assumptions remain the same here) ...
     st.markdown("---")
     st.subheader("Funnel Analysis Assumptions")
-
-    # Conversion Rate Assumption
-    rate_options_display = {
-        "Manual Input Below": "Manual", "Overall Historical Average": "Overall", 
-        "1-Month Rolling Avg.": "1-Month", "3-Month Rolling Avg.": "3-Month", "6-Month Rolling Avg.": "6-Month"
-    }
-    selected_rate_method_label = st.radio(
-        "Base Funnel Conversion Rates On:", options=list(rate_options_display.keys()), index=2, 
-        key="fa_rate_method_radio", horizontal=True
-    )
-    
-    fa_rate_method_internal = "Manual Input Below"
-    fa_rolling_window = 0
-    if selected_rate_method_label == "Overall Historical Average":
-        fa_rate_method_internal = "Rolling Historical Average"; fa_rolling_window = 999
-    elif "Rolling" in selected_rate_method_label:
-        fa_rate_method_internal = "Rolling Historical Average"
-        fa_rolling_window = int(selected_rate_method_label.split('-')[0])
-
-    # Manual rate inputs
+    rate_options_display = {"Manual Input Below": "Manual", "Overall Historical Average": "Overall", "1-Month Rolling Avg.": "1-Month", "3-Month Rolling Avg.": "3-Month", "6-Month Rolling Avg.": "6-Month"}
+    selected_rate_method_label = st.radio("Base Funnel Conversion Rates On:", options=list(rate_options_display.keys()), index=2, key="fa_rate_method_radio", horizontal=True)
+    fa_rate_method_internal = "Manual Input Below"; fa_rolling_window = 0
+    if selected_rate_method_label == "Overall Historical Average": fa_rate_method_internal = "Rolling Historical Average"; fa_rolling_window = 999
+    elif "Rolling" in selected_rate_method_label: fa_rate_method_internal = "Rolling Historical Average"; fa_rolling_window = int(selected_rate_method_label.split('-')[0])
     manual_rates_fa = {}
     st.write("Define Manual Conversion Rates for Funnel Analysis:")
     fa_cols_rate = st.columns(3)
@@ -1502,73 +1483,71 @@ def render_funnel_analysis_tab():
         manual_rates_fa[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("FA: Appt -> ICF %", 0.0, 100.0, 55.0, key='fa_cr_ai', step=0.1, format="%.1f%%") / 100.0
     with fa_cols_rate[2]:
         manual_rates_fa[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = st.slider("FA: ICF -> Enrolled %", 0.0, 100.0, 85.0, key='fa_cr_ie', step=0.1, format="%.1f%%") / 100.0
-
     st.markdown("---")
 
     # --- Calculation & Display ---
     if st.button("🔬 Analyze Current Funnel", key="run_funnel_analysis"):
-        
-        # Ensure the new rate is included for rolling avg calculation
         manual_rates_with_enroll = manual_rates_fa.copy()
         if f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}" not in manual_rates_with_enroll:
-             manual_rates_with_enroll[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85 # Default if not in UI somehow
-
+             manual_rates_with_enroll[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85
         effective_rates_fa, rates_method_desc_fa = determine_effective_projection_rates(
             st.session_state.referral_data_processed, st.session_state.ordered_stages,
             st.session_state.ts_col_map, fa_rate_method_internal,
-            fa_rolling_window, manual_rates_with_enroll, # Pass the full dictionary
+            fa_rolling_window, manual_rates_with_enroll,
             st.session_state.get('inter_stage_lags', {}), sidebar_display_area=None
         )
-
-        st.session_state.funnel_analysis_results = calculate_pipeline_projection(
+        st.session_state.funnel_analysis_data = calculate_pipeline_projection(
             _processed_df=st.session_state.referral_data_processed,
             ordered_stages=st.session_state.ordered_stages,
             ts_col_map=st.session_state.ts_col_map,
             inter_stage_lags=st.session_state.get('inter_stage_lags', {}),
             conversion_rates=effective_rates_fa,
-            lag_assumption_model=None # This parameter is not used in the current version
+            lag_assumption_model=None
         )
         st.session_state.funnel_analysis_rates_desc = rates_method_desc_fa
 
-    if 'funnel_analysis_results' in st.session_state:
-        results_df = st.session_state.funnel_analysis_results
+    if 'funnel_analysis_data' in st.session_state:
+        # Unpack the returned dictionary
+        analysis_data = st.session_state.funnel_analysis_data
+        results_df = analysis_data['results_df']
+        total_icf_yield = analysis_data['total_icf_yield']
+        total_enroll_yield = analysis_data['total_enroll_yield']
         rates_desc = st.session_state.get('funnel_analysis_rates_desc', "N/A")
+        
         st.caption(f"**Projection Using: {rates_desc} Conversion Rates**")
 
-        if not results_df.empty:
-            total_icfs = results_df['Projected_ICF_Landed'].sum()
-            total_enrolls = results_df['Projected_Enrollments_Landed'].sum()
+        future_icfs = results_df['Projected_ICF_Landed'].sum()
+        overdue_icfs = total_icf_yield - future_icfs
+        future_enrolls = results_df['Projected_Enrollments_Landed'].sum()
+        overdue_enrolls = total_enroll_yield - future_enrolls
 
-            fa_col1_res, fa_col2_res = st.columns(2)
-            fa_col1_res.metric("Total Expected ICFs from Pipeline", f"{total_icfs:,.0f}")
-            fa_col2_res.metric("Total Expected Enrollments from Pipeline", f"{total_enrolls:,.0f}")
+        st.subheader("Pipeline Yield Summary")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Expected ICF Yield", f"{total_icf_yield:,.1f}")
+            st.caption(f"Projected Future Landings: **{future_icfs:,}**")
+            if overdue_icfs > 0.1:
+                st.caption(f"Overdue / In Past: **{overdue_icfs:,.1f}**")
+        with col2:
+            st.metric("Total Expected Enrollment Yield", f"{total_enroll_yield:,.1f}")
+            st.caption(f"Projected Future Landings: **{future_enrolls:,}**")
+            if overdue_enrolls > 0.1:
+                st.caption(f"Overdue / In Past: **{overdue_enrolls:,.1f}**")
 
-            st.subheader("Projected Monthly Landings from Current Pipeline")
-            display_df = results_df.copy()
-            display_df.index = display_df.index.strftime('%Y-%m')
-            
-            display_df = display_df[['Projected_ICF_Landed', 'Projected_Enrollments_Landed']]
-            st.dataframe(display_df.style.format("{:,.0f}"))
-            
-            st.subheader("Cumulative Projections Over Time")
-            chart_df = results_df[['Cumulative_ICF_Landed', 'Cumulative_Enrollments_Landed']].copy()
-            if isinstance(chart_df.index, pd.PeriodIndex):
-                chart_df.index = chart_df.index.to_timestamp()
-            st.line_chart(chart_df)
+        st.subheader("Projected Monthly Landings (Future)")
+        display_df = results_df[['Projected_ICF_Landed', 'Projected_Enrollments_Landed']]
+        st.dataframe(display_df.style.format("{:,.0f}"))
+        
+        st.subheader("Cumulative Future Projections Over Time")
+        chart_df = results_df[['Cumulative_ICF_Landed', 'Cumulative_Enrollments_Landed']].copy()
+        if isinstance(chart_df.index, pd.PeriodIndex): chart_df.index = chart_df.index.to_timestamp()
+        st.line_chart(chart_df)
 
-            try:
-                csv_fa = results_df.reset_index().to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Funnel Analysis Data", data=csv_fa,
-                    file_name='funnel_analysis_projection.csv', mime='text/csv',
-                    key='dl_funnel_analysis'
-                )
-            except Exception as e:
-                st.warning(f"Funnel Analysis download error: {e}")
-
-        else:
-            # This message is now handled inside the calculation function for better context
-            pass
+        try:
+            csv_fa = results_df.reset_index().to_csv(index=False).encode('utf-8')
+            st.download_button(label="Download Funnel Analysis Data", data=csv_fa, file_name='funnel_analysis_projection.csv', mime='text/csv', key='dl_funnel_analysis')
+        except Exception as e:
+            st.warning(f"Funnel Analysis download error: {e}")
             
 # --- Streamlit UI ---
 # ... (Session state initializations remain the same) ...
