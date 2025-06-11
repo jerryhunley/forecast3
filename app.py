@@ -1453,8 +1453,8 @@ def calculate_pipeline_projection(
     return {
         'results_df': results_df,
         'total_icf_yield': total_icf_yield,
-        'total_enroll_yield': total_enroll_yield
-        'in_flight_df_for_narrative': in_flight_df # Add this line
+        'total_enroll_yield': total_enroll_yield,
+        'in_flight_df_for_narrative': in_flight_df
     }
 
 # --- NEW FUNCTION FOR FUNNEL NARRATIVE ---
