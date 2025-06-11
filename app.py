@@ -1340,28 +1340,37 @@ def calculate_ai_forecast_core(
 # --- END OF AI FORECAST CORE FUNCTION ---
 
 
-# --- NEW, MORE DETAILED DEBUGGING FUNCTION ---
-def debug_pipeline_projection_final(
+# --- FINAL, VERIFIED CORE FUNCTION FOR FUNNEL ANALYSIS ---
+@st.cache_data
+def calculate_pipeline_projection(
     _processed_df, ordered_stages, ts_col_map, inter_stage_lags,
     conversion_rates, lag_assumption_model
 ):
     """
-    This final debug function prints every critical list and dataframe
-    to find the data disconnection.
+    Calculates the future ICFs and Enrollments expected from the current in-flight pipeline.
+    This version correctly handles all sources for both ICF and Enrollment projections and is robust to missing lag data.
     """
-    st.subheader("🕵️‍♂️ Final Diagnostic Output")
+    default_return = pd.DataFrame(columns=['Projected_ICF_Landed', 'Cumulative_ICF_Landed', 'Projected_Enrollments_Landed', 'Cumulative_Enrollments_Landed'])
+    if _processed_df is None or _processed_df.empty:
+        return default_return
 
-    # --- Initial Data ---
-    st.write("---")
-    st.write("**Step 1: Initial State & In-Flight Leads**")
+    # --- 1. Define TRUE Terminal Stages ---
     true_terminal_stages = [s for s in [STAGE_ENROLLED, STAGE_SCREEN_FAILED, STAGE_LOST] if s in ts_col_map]
     true_terminal_ts_cols = [ts_col_map.get(s) for s in true_terminal_stages]
+    if not true_terminal_ts_cols:
+        st.warning("Funnel Analysis: Could not identify any true terminal stages (Enrolled, Screen Failed, Lost).")
+        return default_return
+
+    # --- 2. Filter for In-Flight Leads ---
     in_flight_df = _processed_df.copy()
     for ts_col in true_terminal_ts_cols:
         if ts_col in in_flight_df.columns:
             in_flight_df = in_flight_df[in_flight_df[ts_col].isna()]
-    st.metric("Total 'In-Flight' Leads", len(in_flight_df))
+    if in_flight_df.empty:
+        st.info("Funnel Analysis: No leads are currently in-flight.")
+        return default_return
 
+    # --- 3. Determine Current Stage for In-Flight Leads ---
     def get_current_stage(row, ordered_stages, ts_col_map):
         last_stage, last_ts = None, pd.NaT
         for stage in ordered_stages:
@@ -1376,75 +1385,82 @@ def debug_pipeline_projection_final(
     )
     in_flight_df.dropna(subset=['current_stage'], inplace=True)
     
-    # --- ICF POOL CALCULATION ---
-    st.write("---")
-    st.write("**Step 2: Building the Master Pool of All ICFs**")
+    # --- 4. Create the Master Pool of ALL In-Flight ICFs (Existing and Projected) ---
     all_icfs_to_project = []
-    ts_icf_col = ts_col_map.get(STAGE_SIGNED_ICF)
+    icf_target_stage = STAGE_SIGNED_ICF
+    ts_icf_col = ts_col_map.get(icf_target_stage)
 
-    # Source 1: Already signed ICFs
+    # Source 1: Leads that have ALREADY signed an ICF. Lag to become an ICF is 0.
     already_icf_in_flight = in_flight_df[in_flight_df[ts_icf_col].notna()].copy()
     for _, row in already_icf_in_flight.iterrows():
-        all_icfs_to_project.append({'prob': 1.0, 'lag_to_icf': 0.0, 'start_date': row[ts_icf_col], 'source': 'Existing'})
+        all_icfs_to_project.append({'prob': 1.0, 'lag_to_icf': 0.0, 'start_date': row[ts_icf_col]})
 
-    # Source 2: Leads before ICF
+    # Source 2: Leads that have NOT yet signed an ICF.
     leads_before_icf = in_flight_df[in_flight_df[ts_icf_col].isna()].copy()
     for _, row in leads_before_icf.iterrows():
-        prob_to_icf, lags_list, path_found = 1.0, [], False
+        prob_to_icf, lags_to_icf_list, path_found = 1.0, [], False
+        
         start_index = ordered_stages.index(row['current_stage'])
         for i in range(start_index, len(ordered_stages) - 1):
             from_stage, to_stage = ordered_stages[i], ordered_stages[i+1]
-            prob_to_icf *= conversion_rates.get(f"{from_stage} -> {to_stage}", 0.0)
-            lags_list.append(inter_stage_lags.get(f"{from_stage} -> {to_stage}", 0.0))
-            if to_stage == STAGE_SIGNED_ICF: path_found = True; break
+            rate_key = f"{from_stage} -> {to_stage}"
+            prob_to_icf *= conversion_rates.get(rate_key, 0.0)
+            lags_to_icf_list.append(inter_stage_lags.get(rate_key, 0.0))
+            if to_stage == icf_target_stage:
+                path_found = True
+                break
+        
         if path_found and prob_to_icf > 0:
-            total_lag = np.nansum(lags_list)
-            all_icfs_to_project.append({'prob': prob_to_icf, 'lag_to_icf': total_lag, 'start_date': row['current_stage_ts'], 'source': 'Projected'})
+            total_lag_to_icf = np.nansum(lags_to_icf_list) # Safely sum lags, treating missing (NaN) as 0
+            all_icfs_to_project.append({'prob': prob_to_icf, 'lag_to_icf': total_lag_to_icf, 'start_date': row['current_stage_ts']})
 
-    st.metric("Total ICFs in Master Pool (Existing + Projected)", len(all_icfs_to_project))
-    df_all_icfs = pd.DataFrame(all_icfs_to_project)
-    st.write("Breakdown of Master ICF Pool by Source:")
-    st.dataframe(df_all_icfs['source'].value_counts())
-    st.write("Sample of Master ICF Pool (first 5 rows):")
-    st.dataframe(df_all_icfs.head())
-
-    # --- ENROLLMENT POOL CALCULATION ---
-    st.write("---")
-    st.write("**Step 3: Projecting Enrollments from the Master ICF Pool**")
+    # --- 5. Project Enrollments from the Master Pool of ICFs ---
     projected_enrollments = []
     icf_to_enroll_rate = conversion_rates.get(f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}", 0.0)
     icf_to_enroll_lag = inter_stage_lags.get(f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}", 0.0)
-    if pd.isna(icf_to_enroll_lag): icf_to_enroll_lag = 0.0
-
-    st.metric("ICF -> Enrolled Conversion Rate Being Used", f"{icf_to_enroll_rate:.2%}")
-    st.metric("ICF -> Enrolled Lag Being Used (Days)", f"{icf_to_enroll_lag:.1f}")
+    if pd.isna(icf_to_enroll_lag): icf_to_enroll_lag = 0.0 # Robustness for missing lag
 
     for icf in all_icfs_to_project:
-        if pd.isna(icf['start_date']): continue
+        if pd.isna(icf['start_date']) or pd.isna(icf['lag_to_icf']): continue
         icf_landing_date = icf['start_date'] + pd.to_timedelta(icf['lag_to_icf'], unit='D')
-        if pd.isna(icf_landing_date): continue # Skip if date calculation fails
+        if pd.isna(icf_landing_date): continue # Final check
         
         projected_enrollments.append({
             'prob': icf['prob'] * icf_to_enroll_rate,
-            'lag': icf_to_enroll_lag,
-            'start_date': icf_landing_date,
-            'source_prob': icf['prob'] # For debugging
+            'lag': icf_to_enroll_lag, # Additional lag from ICF to Enrollment
+            'start_date': icf_landing_date # Start for this lag is when the ICF lands
         })
+
+    # --- 6. Aggregate and Smear Projections into Monthly Buckets ---
+    days_in_avg_month = 30.4375
+    proj_start_month = pd.Period(datetime.now(), 'M')
+    max_lag_enroll = max([p['lag'] for p in projected_enrollments if pd.notna(p['lag'])], default=0)
+    max_lag_icf = max([p['lag_to_icf'] for p in all_icfs_to_project if pd.notna(p['lag_to_icf'])], default=0)
+    proj_horizon = int(np.ceil((max_lag_icf + max_lag_enroll) / days_in_avg_month)) + 3
+    proj_horizon = max(proj_horizon, 6)
     
-    st.metric("Total Items in Enrollment Projection Pool", len(projected_enrollments))
-    df_proj_enroll = pd.DataFrame(projected_enrollments)
-    st.write("Sample of Enrollment Projection Pool (first 5 rows):")
-    st.dataframe(df_proj_enroll.head())
+    future_months = pd.period_range(start=proj_start_month, periods=proj_horizon, freq='M')
+    results_df = pd.DataFrame(0.0, index=future_months, columns=['Projected_ICF_Landed', 'Projected_Enrollments_Landed'])
 
-    # --- FINAL CALCULATION ---
-    st.write("---")
-    st.write("**Step 4: Final Summation**")
-    total_projected_icfs = df_all_icfs['prob'].sum()
-    total_projected_enrollments = df_proj_enroll['prob'].sum()
-    st.metric("FINAL CALCULATED ICFs (Sum of Probabilities)", f"{total_projected_icfs:.2f}")
-    st.metric("FINAL CALCULATED ENROLLMENTS (Sum of Probabilities)", f"{total_projected_enrollments:.2f}")
+    def smear_projection(df, projections_list, lag_col_name, target_col):
+        for proj in projections_list:
+            if proj['prob'] <= 0 or pd.isna(proj['start_date']) or pd.isna(proj[lag_col_name]): continue
+            landing_date = proj['start_date'] + pd.to_timedelta(proj[lag_col_name], unit='D')
+            landing_period = pd.Period(landing_date, 'M')
+            if landing_period in df.index:
+                df.loc[landing_period, target_col] += proj['prob']
+        return df
 
-    return pd.DataFrame()
+    results_df = smear_projection(results_df, all_icfs_to_project, 'lag_to_icf', 'Projected_ICF_Landed')
+    results_df = smear_projection(results_df, projected_enrollments, 'lag', 'Projected_Enrollments_Landed')
+
+    # Final formatting
+    results_df['Projected_ICF_Landed'] = results_df['Projected_ICF_Landed'].round(0).astype(int)
+    results_df['Cumulative_ICF_Landed'] = results_df['Projected_ICF_Landed'].cumsum()
+    results_df['Projected_Enrollments_Landed'] = results_df['Projected_Enrollments_Landed'].round(0).astype(int)
+    results_df['Cumulative_Enrollments_Landed'] = results_df['Projected_Enrollments_Landed'].cumsum()
+
+    return results_df
 
 # --- NEW: UI TAB FOR FUNNEL ANALYSIS ---
 def render_funnel_analysis_tab():
@@ -1505,7 +1521,7 @@ def render_funnel_analysis_tab():
             st.session_state.get('inter_stage_lags', {}), sidebar_display_area=None
         )
 
-        st.session_state.funnel_analysis_results = debug_pipeline_projection_final(
+        st.session_state.funnel_analysis_results = calculate_pipeline_projection
             st.session_state.referral_data_processed,
             st.session_state.ordered_stages,
             st.session_state.ts_col_map,
