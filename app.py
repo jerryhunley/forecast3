@@ -1521,13 +1521,13 @@ def render_funnel_analysis_tab():
             st.session_state.get('inter_stage_lags', {}), sidebar_display_area=None
         )
 
-        st.session_state.funnel_analysis_results = calculate_pipeline_projection
-            st.session_state.referral_data_processed,
-            st.session_state.ordered_stages,
-            st.session_state.ts_col_map,
-            st.session_state.get('inter_stage_lags', {}),
-            effective_rates_fa,
-            None 
+        st.session_state.funnel_analysis_results = calculate_pipeline_projection(
+            _processed_df=st.session_state.referral_data_processed,
+            ordered_stages=st.session_state.ordered_stages,
+            ts_col_map=st.session_state.ts_col_map,
+            inter_stage_lags=st.session_state.get('inter_stage_lags', {}),
+            conversion_rates=effective_rates_fa,
+            lag_assumption_model=None # This parameter is not used in the current version
         )
         st.session_state.funnel_analysis_rates_desc = rates_method_desc_fa
 
