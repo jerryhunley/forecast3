@@ -1454,17 +1454,61 @@ def calculate_pipeline_projection(
         'results_df': results_df,
         'total_icf_yield': total_icf_yield,
         'total_enroll_yield': total_enroll_yield
+        'in_flight_df_for_narrative': in_flight_df
     }
 
-# --- FINAL, VERIFIED, AND CORRECTED UI TAB ---
+# --- NEW FUNCTION FOR FUNNEL NARRATIVE ---
+def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates):
+    """
+    Generates a list of dictionaries, each representing a step in the funnel narrative.
+    """
+    if in_flight_df.empty:
+        return []
+
+    narrative_steps = []
+    
+    # Get the counts of leads currently at each stage
+    stage_counts = in_flight_df['current_stage'].value_counts().to_dict()
+
+    # This variable will track the total expected yield as we move down the funnel
+    cumulative_yield = len(in_flight_df) 
+
+    for i, stage_name in enumerate(ordered_stages):
+        # Stop before the last stage, as there's no "next step"
+        if i >= len(ordered_stages) - 1:
+            break
+
+        # --- Data for the current step ---
+        leads_at_this_stage = stage_counts.get(stage_name, 0)
+        
+        # --- Data for the next step ---
+        next_stage_name = ordered_stages[i+1]
+        rate_key = f"{stage_name} -> {next_stage_name}"
+        conversion_rate = conversion_rates.get(rate_key)
+
+        # Calculate the expected number of people to advance from the current group
+        projected_to_advance = leads_at_this_stage * conversion_rate if conversion_rate is not None else 0
+
+        step_data = {
+            "current_stage": stage_name,
+            "leads_at_stage": leads_at_this_stage,
+            "next_stage": next_stage_name,
+            "conversion_rate": conversion_rate,
+            "projected_to_advance": projected_to_advance,
+        }
+        narrative_steps.append(step_data)
+
+    return narrative_steps
+
+# --- REVISED UI TAB FOR FUNNEL ANALYSIS ---
 def render_funnel_analysis_tab():
     st.header("🔬 Funnel Analysis (Based on Current Pipeline)")
     st.info("""
-    This forecast shows the expected outcomes from the leads **already in your funnel**.
+    This forecast shows the expected outcomes (**ICFs & Enrollments**) from the leads **already in your funnel**.
     It answers the question: "If we stopped all new recruitment activities today, what results would we still see and when?"
     """)
 
-    # ... (All the st.radio and st.slider controls for assumptions remain the same here) ...
+    # ... Assumption controls ...
     st.markdown("---")
     st.subheader("Funnel Analysis Assumptions")
     rate_options_display = {"Manual Input Below": "Manual", "Overall Historical Average": "Overall", "1-Month Rolling Avg.": "1-Month", "3-Month Rolling Avg.": "3-Month", "6-Month Rolling Avg.": "6-Month"}
@@ -1504,45 +1548,62 @@ def render_funnel_analysis_tab():
             conversion_rates=effective_rates_fa,
             lag_assumption_model=None
         )
+        # Also generate the narrative data and store it
+        st.session_state.funnel_narrative_data = generate_funnel_narrative(
+            st.session_state.funnel_analysis_data.get('in_flight_df_for_narrative', pd.DataFrame()),
+            st.session_state.ordered_stages,
+            effective_rates_fa
+        )
         st.session_state.funnel_analysis_rates_desc = rates_method_desc_fa
 
     if 'funnel_analysis_data' in st.session_state:
-        # Unpack the returned dictionary
         analysis_data = st.session_state.funnel_analysis_data
         results_df = analysis_data['results_df']
         total_icf_yield = analysis_data['total_icf_yield']
         total_enroll_yield = analysis_data['total_enroll_yield']
+        narrative_steps = st.session_state.get('funnel_narrative_data', [])
         rates_desc = st.session_state.get('funnel_analysis_rates_desc', "N/A")
         
         st.caption(f"**Projection Using: {rates_desc} Conversion Rates**")
-
-        future_icfs = results_df['Projected_ICF_Landed'].sum()
-        overdue_icfs = total_icf_yield - future_icfs
-        future_enrolls = results_df['Projected_Enrollments_Landed'].sum()
-        overdue_enrolls = total_enroll_yield - future_enrolls
-
         st.subheader("Pipeline Yield Summary")
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Total Expected ICF Yield", f"{total_icf_yield:,.1f}")
-            st.caption(f"Projected Future Landings: **{future_icfs:,}**")
-            if overdue_icfs > 0.1:
-                st.caption(f"Overdue / In Past: **{overdue_icfs:,.1f}**")
+            st.metric("Total Expected ICF Yield from Funnel", f"{total_icf_yield:,.1f}")
         with col2:
-            st.metric("Total Expected Enrollment Yield", f"{total_enroll_yield:,.1f}")
-            st.caption(f"Projected Future Landings: **{future_enrolls:,}**")
-            if overdue_enrolls > 0.1:
-                st.caption(f"Overdue / In Past: **{overdue_enrolls:,.1f}**")
+            st.metric("Total Expected Enrollment Yield from Funnel", f"{total_enroll_yield:,.1f}")
+
+        # --- NEW NARRATIVE SECTION ---
+        if narrative_steps:
+            with st.expander("Show Funnel Breakdown", expanded=True):
+                total_expected_from_funnel = {stage: 0.0 for stage in st.session_state.ordered_stages}
+                # Initialize with top-of-funnel leads
+                if narrative_steps:
+                    top_stage = narrative_steps[0]['current_stage']
+                    total_expected_from_funnel[top_stage] = sum(s['leads_at_stage'] for s in narrative_steps)
+
+                for step in narrative_steps:
+                    st.markdown(f"#### From '{step['current_stage']}'")
+                    col1, col2 = st.columns(2)
+                    col1.metric(f"Leads Currently At This Stage", f"{step['leads_at_stage']:,}")
+                    if step['conversion_rate'] is not None:
+                        col2.metric(f"Historical Conversion to '{step['next_stage']}'", f"{step['conversion_rate']:.1%}")
+                        st.info(f"From this group of **{step['leads_at_stage']:,}** leads, we project **~{step['projected_to_advance']:.1f}** will advance to *'{step['next_stage']}'*.", icon="➡️")
+                    else:
+                        col2.warning(f"No conversion rate available for '{step['next_stage']}'")
+                    st.markdown("---")
 
         st.subheader("Projected Monthly Landings (Future)")
+        future_icfs = results_df['Projected_ICF_Landed'].sum()
+        overdue_icfs = total_icf_yield - future_icfs
+        if overdue_icfs > 0.1:
+            st.warning(f"**Note:** {overdue_icfs:,.1f} ICFs from the total yield were projected to land in past months and are not shown in the future forecast table.", icon="⚠️")
+        
         display_df = results_df[['Projected_ICF_Landed', 'Projected_Enrollments_Landed']]
         st.dataframe(display_df.style.format("{:,.0f}"))
-        
         st.subheader("Cumulative Future Projections Over Time")
         chart_df = results_df[['Cumulative_ICF_Landed', 'Cumulative_Enrollments_Landed']].copy()
         if isinstance(chart_df.index, pd.PeriodIndex): chart_df.index = chart_df.index.to_timestamp()
         st.line_chart(chart_df)
-
         try:
             csv_fa = results_df.reset_index().to_csv(index=False).encode('utf-8')
             st.download_button(label="Download Funnel Analysis Data", data=csv_fa, file_name='funnel_analysis_projection.csv', mime='text/csv', key='dl_funnel_analysis')
