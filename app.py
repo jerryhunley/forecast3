@@ -1457,44 +1457,60 @@ def calculate_pipeline_projection(
         'in_flight_df_for_narrative': in_flight_df
     }
 
-# --- NEW FUNCTION FOR FUNNEL NARRATIVE ---
-def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates):
+# --- REVISED FUNCTION FOR A MORE DETAILED FUNNEL NARRATIVE ---
+def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates, inter_stage_lags):
     """
     Generates a list of dictionaries, each representing a step in the funnel narrative.
+    NOW includes full downstream projections and inter-stage lags.
     """
-    if in_flight_df.empty:
+    if in_flight_df.empty or not inter_stage_lags:
         return []
 
     narrative_steps = []
-    
-    # Get the counts of leads currently at each stage
     stage_counts = in_flight_df['current_stage'].value_counts().to_dict()
 
-    # This variable will track the total expected yield as we move down the funnel
-    cumulative_yield = len(in_flight_df) 
-
     for i, stage_name in enumerate(ordered_stages):
-        # Stop before the last stage, as there's no "next step"
-        if i >= len(ordered_stages) - 1:
+        # Stop before the last stage (Enrollment)
+        if i >= len(ordered_stages) - 1 or stage_name == STAGE_ENROLLED:
             break
 
-        # --- Data for the current step ---
         leads_at_this_stage = stage_counts.get(stage_name, 0)
         
-        # --- Data for the next step ---
+        # --- NEW: Full Downstream Projection Logic ---
+        downstream_projections = []
+        cumulative_prob = 1.0
+        # Project from the *next* stage onwards
+        for j in range(i + 1, len(ordered_stages)):
+            from_stage = ordered_stages[j-1]
+            to_stage = ordered_stages[j]
+            
+            # Get the rate for this specific step in the funnel
+            step_rate_key = f"{from_stage} -> {to_stage}"
+            step_rate = conversion_rates.get(step_rate_key)
+
+            if step_rate is None: # Stop if a rate is missing
+                break
+
+            cumulative_prob *= step_rate
+            projected_count = leads_at_this_stage * cumulative_prob
+
+            downstream_projections.append({
+                "stage_name": to_stage,
+                "projected_count": projected_count,
+            })
+            
+        # --- Data for the immediate next step ---
         next_stage_name = ordered_stages[i+1]
         rate_key = f"{stage_name} -> {next_stage_name}"
-        conversion_rate = conversion_rates.get(rate_key)
-
-        # Calculate the expected number of people to advance from the current group
-        projected_to_advance = leads_at_this_stage * conversion_rate if conversion_rate is not None else 0
-
+        lag_key = f"{stage_name} -> {next_stage_name}"
+        
         step_data = {
             "current_stage": stage_name,
             "leads_at_stage": leads_at_this_stage,
             "next_stage": next_stage_name,
-            "conversion_rate": conversion_rate,
-            "projected_to_advance": projected_to_advance,
+            "conversion_rate": conversion_rates.get(rate_key),
+            "lag_to_next_stage": inter_stage_lags.get(lag_key), # Add the lag
+            "downstream_projections": downstream_projections, # Add the full projection list
         }
         narrative_steps.append(step_data)
 
@@ -1508,7 +1524,7 @@ def render_funnel_analysis_tab():
     It answers the question: "If we stopped all new recruitment activities today, what results would we still see and when?"
     """)
 
-    # ... Assumption controls ...
+    # ... Assumption controls (remain the same) ...
     st.markdown("---")
     st.subheader("Funnel Analysis Assumptions")
     rate_options_display = {"Manual Input Below": "Manual", "Overall Historical Average": "Overall", "1-Month Rolling Avg.": "1-Month", "3-Month Rolling Avg.": "3-Month", "6-Month Rolling Avg.": "6-Month"}
@@ -1534,6 +1550,7 @@ def render_funnel_analysis_tab():
         manual_rates_with_enroll = manual_rates_fa.copy()
         if f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}" not in manual_rates_with_enroll:
              manual_rates_with_enroll[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85
+        
         effective_rates_fa, rates_method_desc_fa = determine_effective_projection_rates(
             st.session_state.referral_data_processed, st.session_state.ordered_stages,
             st.session_state.ts_col_map, fa_rate_method_internal,
@@ -1548,11 +1565,13 @@ def render_funnel_analysis_tab():
             conversion_rates=effective_rates_fa,
             lag_assumption_model=None
         )
-        # Also generate the narrative data and store it
+        
+        # --- MODIFIED: Pass inter_stage_lags to the narrative function ---
         st.session_state.funnel_narrative_data = generate_funnel_narrative(
             st.session_state.funnel_analysis_data.get('in_flight_df_for_narrative', pd.DataFrame()),
             st.session_state.ordered_stages,
-            effective_rates_fa
+            effective_rates_fa,
+            st.session_state.get('inter_stage_lags', {}) # Pass the lags here
         )
         st.session_state.funnel_analysis_rates_desc = rates_method_desc_fa
 
@@ -1572,24 +1591,33 @@ def render_funnel_analysis_tab():
         with col2:
             st.metric("Total Expected Enrollment Yield from Funnel", f"{total_enroll_yield:,.1f}")
 
-        # --- NEW NARRATIVE SECTION ---
+        # --- NEW & IMPROVED NARRATIVE SECTION ---
         if narrative_steps:
             with st.expander("Show Funnel Breakdown", expanded=True):
-                total_expected_from_funnel = {stage: 0.0 for stage in st.session_state.ordered_stages}
-                # Initialize with top-of-funnel leads
-                if narrative_steps:
-                    top_stage = narrative_steps[0]['current_stage']
-                    total_expected_from_funnel[top_stage] = sum(s['leads_at_stage'] for s in narrative_steps)
-
                 for step in narrative_steps:
+                    if step['leads_at_stage'] == 0: continue # Skip stages with no leads
+
                     st.markdown(f"#### From '{step['current_stage']}'")
-                    col1, col2 = st.columns(2)
+                    
+                    # Display metrics for the immediate next step
+                    col1, col2, col3 = st.columns(3)
                     col1.metric(f"Leads Currently At This Stage", f"{step['leads_at_stage']:,}")
+                    
                     if step['conversion_rate'] is not None:
-                        col2.metric(f"Historical Conversion to '{step['next_stage']}'", f"{step['conversion_rate']:.1%}")
-                        st.info(f"From this group of **{step['leads_at_stage']:,}** leads, we project **~{step['projected_to_advance']:.1f}** will advance to *'{step['next_stage']}'*.", icon="➡️")
+                        col2.metric(f"Conversion to '{step['next_stage']}'", f"{step['conversion_rate']:.1%}")
                     else:
-                        col2.warning(f"No conversion rate available for '{step['next_stage']}'")
+                        col2.warning(f"No rate for '{step['next_stage']}'")
+
+                    if step['lag_to_next_stage'] is not None and pd.notna(step['lag_to_next_stage']):
+                        col3.metric(f"Avg. Time to '{step['next_stage']}'", f"{step['lag_to_next_stage']:.1f} Days")
+                    else:
+                        col3.info("No lag data")
+
+                    # Display the full list of downstream projections
+                    st.write("From this group, we project:")
+                    for proj in step['downstream_projections']:
+                        st.info(f"➡️ **~{proj['projected_count']:.1f}** will advance to **'{proj['stage_name']}'**", icon="➡️")
+
                     st.markdown("---")
 
         st.subheader("Projected Monthly Landings (Future)")
