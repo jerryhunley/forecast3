@@ -1616,7 +1616,7 @@ def render_funnel_analysis_tab():
                     # Display the full list of downstream projections
                     st.write("From this group, we project:")
                     for proj in step['downstream_projections']:
-                        st.info(f"➡️ **~{proj['projected_count']:.1f}** will advance to **'{proj['stage_name']}'**", icon="➡️")
+                        st.info(f"**~{proj['projected_count']:.1f}** will advance to **'{proj['stage_name']}'**", icon="➡️")
 
                     st.markdown("---")
 
