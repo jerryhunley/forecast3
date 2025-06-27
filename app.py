@@ -252,14 +252,13 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     return site_metrics_df
 
 
-# NEW: Generic function for calculating performance metrics based on grouping columns
+# --- MODIFIED: Generic function for calculating performance metrics based on grouping columns ---
 def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_map, grouping_cols: list, unclassified_label="Unclassified"):
     if _processed_df is None or _processed_df.empty:
         return pd.DataFrame()
 
     processed_df_copy = _processed_df.copy()
     
-    # This will be the name of the column used for groupby and returned for scoring
     actual_grouping_col_name_for_return = "" 
     
     if len(grouping_cols) == 1:
@@ -268,15 +267,10 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
             st.info(f"Grouping column '{gc_single}' not found. Creating it and labeling all as '{unclassified_label}'.")
             processed_df_copy[gc_single] = unclassified_label 
         
-        # The column used for grouping will be the original name, after cleaning
         processed_df_copy[gc_single] = processed_df_copy[gc_single].astype(str).str.strip().replace('', unclassified_label).fillna(unclassified_label)
         actual_grouping_col_name_for_return = gc_single 
     
-    # SIMPLIFIED: Removed logic for combining multiple grouping_cols as per new requirement
-    # elif len(grouping_cols) > 1: 
-        # ... (This part is removed as we only support single UTM Source for now) ...
-    
-    else: # No grouping columns or more than 1 (which is not supported for now by this simplification)
+    else:
         st.error("Invalid grouping_cols specification for performance metrics calculation. Expecting a single column name.")
         return pd.DataFrame()
 
@@ -287,8 +281,10 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
     ts_appt_col = ts_col_map.get(STAGE_APPOINTMENT_SCHEDULED)
     ts_icf_col = ts_col_map.get(STAGE_SIGNED_ICF)
     ts_sf_col = ts_col_map.get(STAGE_SCREEN_FAILED)
+    # --- NEW: Add the Enrolled stage timestamp ---
+    ts_enrolled_col = ts_col_map.get(STAGE_ENROLLED)
 
-    potential_ts_cols = [ts_pof_col, ts_psa_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col]
+    potential_ts_cols = [ts_pof_col, ts_psa_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col, ts_enrolled_col]
     for col_name_ts in potential_ts_cols:
         if col_name_ts and col_name_ts not in processed_df_copy.columns:
             processed_df_copy[col_name_ts] = pd.NaT
@@ -304,7 +300,7 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
     post_sts_progress_stages = [STAGE_APPOINTMENT_SCHEDULED, STAGE_SIGNED_ICF, "Enrolled", STAGE_SCREEN_FAILED]
 
     try:
-        grouped_data = processed_df_copy.groupby(actual_grouping_col_name_for_return) # Group by the cleaned original column name
+        grouped_data = processed_df_copy.groupby(actual_grouping_col_name_for_return)
         for group_name_val, group_df in grouped_data:
             metrics = {actual_grouping_col_name_for_return: group_name_val} 
             
@@ -314,14 +310,23 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
             count_appt = group_df[ts_appt_col].notna().sum() if ts_appt_col and ts_appt_col in group_df else 0
             count_icf = group_df[ts_icf_col].notna().sum() if ts_icf_col and ts_icf_col in group_df else 0
             count_sf = group_df[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group_df else 0
+            # --- NEW: Count enrollments ---
+            count_enrolled = group_df[ts_enrolled_col].notna().sum() if ts_enrolled_col and ts_enrolled_col in group_df else 0
 
             metrics['Total Qualified'] = count_pof; metrics['PSA Count'] = count_psa
             metrics['StS Count'] = count_sts; metrics['Appt Count'] = count_appt; metrics['ICF Count'] = count_icf
+            # --- NEW: Add Enrollment Count to metrics ---
+            metrics['Enrollment Count'] = count_enrolled
+            
             metrics['POF -> PSA %'] = (count_psa / count_pof) if count_pof > 0 else 0.0
             metrics['PSA -> StS %'] = (count_sts / count_psa) if count_psa > 0 else 0.0
             metrics['StS -> Appt %'] = (count_appt / count_sts) if count_sts > 0 else 0.0
             metrics['Appt -> ICF %'] = (count_icf / count_appt) if count_appt > 0 else 0.0
             metrics['Qual -> ICF %'] = (count_icf / count_pof) if count_pof > 0 else 0.0
+            
+            # --- NEW: Add Enrollment conversion rates to metrics ---
+            metrics['ICF to Enrollment %'] = (count_enrolled / count_icf) if count_icf > 0 else 0.0
+            metrics['Qual to Enrollment %'] = (count_enrolled / count_pof) if count_pof > 0 else 0.0
 
             group_total_projection_lag = 0.0; valid_lag_segments_group = 0
             for seg_from_name, seg_to_name in projection_segments_for_lag_path:
@@ -333,7 +338,7 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
                 else: group_total_projection_lag = np.nan; break
             if valid_lag_segments_group < len(projection_segments_for_lag_path): group_total_projection_lag = np.nan
             
-            if actual_grouping_col_name_for_return == "Site": # If it's for sites
+            if actual_grouping_col_name_for_return == "Site":
                  metrics['Site Projection Lag (Days)'] = group_total_projection_lag
                  metrics['Site Screen Fail %'] = (count_sf / count_icf) if count_icf > 0 else 0.0
                  ttc_times_group = []; funnel_movement_steps_group = []
@@ -359,7 +364,7 @@ def calculate_grouped_performance_metrics(_processed_df, ordered_stages, ts_col_
                          funnel_movement_steps_group.append(len(stages_reached_post_sts))
                  metrics['Avg TTC (Days)'] = np.mean(ttc_times_group) if ttc_times_group else np.nan
                  metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps_group) if funnel_movement_steps_group else 0.0
-            else: # For other groupings like Ad Performance
+            else:
                  metrics['Projection Lag (Days)'] = group_total_projection_lag
                  metrics['Screen Fail % (from ICF)'] = (count_sf / count_icf) if count_icf > 0 else 0.0
                  metrics['Avg TTC (Days)'] = np.nan 
@@ -1695,13 +1700,16 @@ with st.sidebar:
     st.divider()
     with st.expander("Performance Scoring Weights"): 
         weights_input_local = {}
+        # --- NEW: Added sliders for Enrollment metrics ---
+        weights_input_local["Qual to Enrollment %"] = st.slider("Qual (POF) -> Enrollment %", 0, 100, 10, key='w_qen_v1')
+        weights_input_local["ICF to Enrollment %"] = st.slider("ICF -> Enrollment %", 0, 100, 10, key='w_ien_v1')
+        
         weights_input_local["Qual -> ICF %"] = st.slider("Qual (POF) -> ICF %", 0, 100, 20, key='w_qicf_v2')
         weights_input_local["Avg TTC (Days)"] = st.slider("Avg Time to Contact", 0, 100, 25, key='w_ttc_v2', help="Note: This metric is more relevant for Site Performance.")
         weights_input_local["Avg Funnel Movement Steps"] = st.slider("Avg Funnel Movement Steps", 0, 100, 5, key='w_fms_v2', help="Note: This metric is more relevant for Site Performance.")
         
-        # Ensuring correct weight keys match output of calculate_grouped_performance_metrics
         weights_input_local["Screen Fail % (from ICF)"] = st.slider("Screen Fail % (from ICF)", 0, 100, 5, key='w_sfr_v3_generic', help="Screen Failures as % of ICFs. Used for Ad Performance.")
-        weights_input_local["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr_v2_site', help="Used for Site Performance.") # Keep specific for site if desired
+        weights_input_local["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr_v2_site', help="Used for Site Performance.")
         
         weights_input_local["StS -> Appt %"] = st.slider("StS -> Appt Sched %", 0, 100, 30, key='w_sa_site_score_v2')
         weights_input_local["Appt -> ICF %"] = st.slider("Appt Sched -> ICF %", 0, 100, 15, key='w_ai_site_score_v2')
@@ -1868,8 +1876,9 @@ if st.session_state.data_processed_successfully:
         if referral_data_processed is not None and ordered_stages is not None and ts_col_map is not None and weights_normalized and not site_metrics_calculated_data.empty:
             ranked_sites_df_tab2 = score_sites(site_metrics_calculated_data, weights_normalized) 
             st.subheader("Site Ranking")
-            display_cols_sites_tab2 = ['Site', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
-                                   'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
+            # --- NEW: Added Enrollment metrics to the display list ---
+            display_cols_sites_tab2 = ['Site', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
+                                   'Qual to Enrollment %', 'ICF to Enrollment %', 'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
                                    'Avg TTC (Days)', 'Avg Funnel Movement Steps', 'Site Screen Fail %', 'Lag Qual -> ICF (Days)', 'Site Projection Lag (Days)']
             display_cols_sites_exist_tab2 = [col for col in display_cols_sites_tab2 if col in ranked_sites_df_tab2.columns]
             final_ranked_display_tab2 = ranked_sites_df_tab2[display_cols_sites_exist_tab2].copy()
@@ -1913,8 +1922,9 @@ if st.session_state.data_processed_successfully:
                     group_col_name="UTM Source" 
                 )
                 
-                display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count',
-                                   'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
+                # --- NEW: Added Enrollment metrics to the display list ---
+                display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
+                                   'Qual to Enrollment %', 'ICF to Enrollment %', 'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
                                    'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
                                    'Avg TTC (Days)', 'Avg Funnel Movement Steps'] 
                 
