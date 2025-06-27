@@ -1457,11 +1457,11 @@ def calculate_pipeline_projection(
         'in_flight_df_for_narrative': in_flight_df
     }
 
-# --- REVISED FUNCTION FOR A MORE DETAILED FUNNEL NARRATIVE ---
+# --- REVISED FUNCTION FOR A MORE DETAILED FUNNEL NARRATIVE (with cumulative time) ---
 def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates, inter_stage_lags):
     """
     Generates a list of dictionaries, each representing a step in the funnel narrative.
-    NOW includes full downstream projections and inter-stage lags.
+    NOW includes cumulative downstream projections with cumulative lags.
     """
     if in_flight_df.empty or not inter_stage_lags:
         return []
@@ -1470,36 +1470,44 @@ def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates, in
     stage_counts = in_flight_df['current_stage'].value_counts().to_dict()
 
     for i, stage_name in enumerate(ordered_stages):
-        # Stop before the last stage (Enrollment)
         if i >= len(ordered_stages) - 1 or stage_name == STAGE_ENROLLED:
             break
 
         leads_at_this_stage = stage_counts.get(stage_name, 0)
         
-        # --- NEW: Full Downstream Projection Logic ---
         downstream_projections = []
         cumulative_prob = 1.0
+        cumulative_lag = 0.0 # This will track time from the start_stage
+
         # Project from the *next* stage onwards
         for j in range(i + 1, len(ordered_stages)):
             from_stage = ordered_stages[j-1]
             to_stage = ordered_stages[j]
             
-            # Get the rate for this specific step in the funnel
             step_rate_key = f"{from_stage} -> {to_stage}"
             step_rate = conversion_rates.get(step_rate_key)
 
-            if step_rate is None: # Stop if a rate is missing
+            lag_key = f"{from_stage} -> {to_stage}"
+            step_lag = inter_stage_lags.get(lag_key)
+
+            if step_rate is None:
                 break
 
             cumulative_prob *= step_rate
+            
+            # Add the lag for this step to the cumulative total
+            if pd.notna(step_lag):
+                cumulative_lag += step_lag
+            
             projected_count = leads_at_this_stage * cumulative_prob
 
             downstream_projections.append({
                 "stage_name": to_stage,
                 "projected_count": projected_count,
+                # Store the cumulative lag for this projection step
+                "cumulative_lag_days": cumulative_lag if pd.notna(step_lag) else None,
             })
             
-        # --- Data for the immediate next step ---
         next_stage_name = ordered_stages[i+1]
         rate_key = f"{stage_name} -> {next_stage_name}"
         lag_key = f"{stage_name} -> {next_stage_name}"
@@ -1509,65 +1517,14 @@ def generate_funnel_narrative(in_flight_df, ordered_stages, conversion_rates, in
             "leads_at_stage": leads_at_this_stage,
             "next_stage": next_stage_name,
             "conversion_rate": conversion_rates.get(rate_key),
-            "lag_to_next_stage": inter_stage_lags.get(lag_key), # Add the lag
-            "downstream_projections": downstream_projections, # Add the full projection list
+            "lag_to_next_stage": inter_stage_lags.get(lag_key),
+            "downstream_projections": downstream_projections,
         }
         narrative_steps.append(step_data)
 
     return narrative_steps
 
-# --- NEW FUNCTION FOR THE STEPWISE FUNNEL VISUAL ---
-def calculate_stepwise_funnel_visual_data(in_flight_df, ordered_stages, inter_stage_lags):
-    """
-    Calculates the data needed for a stepwise visual, showing cumulative time
-    from each stage to all subsequent stages.
-    """
-    if in_flight_df.empty or not inter_stage_lags:
-        return []
-
-    visual_data = []
-    stage_counts = in_flight_df['current_stage'].value_counts().to_dict()
-
-    # Iterate through each stage as a potential starting point
-    for i, start_stage_name in enumerate(ordered_stages):
-        # We can't project from the very last stage
-        if i >= len(ordered_stages) - 1:
-            continue
-
-        leads_at_stage = stage_counts.get(start_stage_name, 0)
-        
-        # Only create a visual for stages that currently have leads
-        if leads_at_stage > 0:
-            projection_steps = []
-            cumulative_lag = 0.0
-
-            # Project to all downstream stages
-            for j in range(i + 1, len(ordered_stages)):
-                from_stage = ordered_stages[j-1]
-                to_stage = ordered_stages[j]
-
-                lag_key = f"{from_stage} -> {to_stage}"
-                step_lag = inter_stage_lags.get(lag_key)
-
-                # If a lag is missing, we can't continue the time projection for this path
-                if pd.isna(step_lag):
-                    break
-                
-                cumulative_lag += step_lag
-                projection_steps.append({
-                    "target_stage_name": to_stage,
-                    "cumulative_lag_days": cumulative_lag,
-                })
-
-            visual_data.append({
-                "start_stage_name": start_stage_name,
-                "leads_at_stage": leads_at_stage,
-                "projection_steps": projection_steps,
-            })
-            
-    return visual_data
-
-# --- REVISED UI TAB FOR FUNNEL ANALYSIS (With Stepwise Visual) ---
+# --- REVISED UI TAB FOR FUNNEL ANALYSIS (with time added to narrative) ---
 def render_funnel_analysis_tab():
     st.header("🔬 Funnel Analysis (Based on Current Pipeline)")
     st.info("""
@@ -1623,13 +1580,6 @@ def render_funnel_analysis_tab():
             effective_rates_fa,
             st.session_state.get('inter_stage_lags', {})
         )
-        
-        # --- NEW: Call the calculation for the visual ---
-        st.session_state.funnel_visual_data = calculate_stepwise_funnel_visual_data(
-            st.session_state.funnel_analysis_data.get('in_flight_df_for_narrative', pd.DataFrame()),
-            st.session_state.ordered_stages,
-            st.session_state.get('inter_stage_lags', {})
-        )
         st.session_state.funnel_analysis_rates_desc = rates_method_desc_fa
 
     if 'funnel_analysis_data' in st.session_state:
@@ -1638,7 +1588,6 @@ def render_funnel_analysis_tab():
         total_icf_yield = analysis_data['total_icf_yield']
         total_enroll_yield = analysis_data['total_enroll_yield']
         narrative_steps = st.session_state.get('funnel_narrative_data', [])
-        visual_steps = st.session_state.get('funnel_visual_data', [])
         rates_desc = st.session_state.get('funnel_analysis_rates_desc', "N/A")
         
         st.caption(f"**Projection Using: {rates_desc} Conversion Rates**")
@@ -1648,49 +1597,40 @@ def render_funnel_analysis_tab():
             st.metric("Total Expected ICF Yield from Funnel", f"{total_icf_yield:,.1f}")
         with col2:
             st.metric("Total Expected Enrollment Yield from Funnel", f"{total_enroll_yield:,.1f}")
-        
-        # ... (The breakdown narrative section remains the same as the last version) ...
+
+        # --- Refined Narrative Section ---
         if narrative_steps:
-            with st.expander("Show Detailed Funnel Breakdown", expanded=False):
+            with st.expander("Show Funnel Breakdown", expanded=True):
                 for step in narrative_steps:
                     if step['leads_at_stage'] == 0: continue
+
                     st.markdown(f"#### From '{step['current_stage']}'")
+                    
                     col1, col2, col3 = st.columns(3)
                     col1.metric(f"Leads Currently At This Stage", f"{step['leads_at_stage']:,}")
+                    
                     if step['conversion_rate'] is not None:
                         col2.metric(f"Conversion to '{step['next_stage']}'", f"{step['conversion_rate']:.1%}")
                     else:
                         col2.warning(f"No rate for '{step['next_stage']}'")
+
                     if step['lag_to_next_stage'] is not None and pd.notna(step['lag_to_next_stage']):
                         col3.metric(f"Avg. Time to '{step['next_stage']}'", f"{step['lag_to_next_stage']:.1f} Days")
                     else:
                         col3.info("No lag data")
+
                     st.write("From this group, we project:")
                     for proj in step['downstream_projections']:
-                        st.info(f"**~{proj['projected_count']:.1f}** will advance to **'{proj['stage_name']}'**", icon="➡️")
+                        # Build the time string conditionally
+                        time_text = ""
+                        if proj.get('cumulative_lag_days') is not None and pd.notna(proj['cumulative_lag_days']):
+                            time_text = f" in **{proj['cumulative_lag_days']:.1f} days**"
+                        
+                        # Display the combined message
+                        st.info(f"**~{proj['projected_count']:.1f}** will advance to **'{proj['stage_name']}'**{time_text}", icon="➡️")
+
                     st.markdown("---")
 
-        # --- NEW: Render the Stepwise Funnel Visual ---
-        st.subheader("Projected Time to Enrollment from Each Stage")
-        if visual_steps:
-            for start_stage_data in visual_steps:
-                st.markdown(f"##### From **'{start_stage_data['start_stage_name']}'** ({start_stage_data['leads_at_stage']:,} Leads)")
-                
-                # Create as many columns as there are steps in the projection
-                num_steps = len(start_stage_data['projection_steps'])
-                if num_steps > 0:
-                    cols = st.columns(num_steps)
-                    for i, step in enumerate(start_stage_data['projection_steps']):
-                        with cols[i]:
-                            st.metric(
-                                label=step['target_stage_name'],
-                                value=f"{step['cumulative_lag_days']:.1f} Days"
-                            )
-                st.markdown("---")
-        else:
-            st.info("No data available to generate the stepwise funnel visual. Check if 'inter_stage_lags' were calculated.")
-        
-        # ... (The rest of the tab display remains the same) ...
         st.subheader("Projected Monthly Landings (Future)")
         future_icfs = results_df['Projected_ICF_Landed'].sum()
         overdue_icfs = total_icf_yield - future_icfs
