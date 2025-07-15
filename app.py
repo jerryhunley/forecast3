@@ -25,27 +25,59 @@ STAGE_ENROLLED = "Enrolled"
 STAGE_LOST = "Lost"
 
 
-# --- Helper Functions ---
+# --- MODIFIED: Helper Functions ---
 @st.cache_data
 def parse_funnel_definition(uploaded_file):
+    """
+    Parses the funnel definition from an uploaded file.
+    This function now automatically handles both CSV (comma-separated)
+    and TSV (tab-separated) files.
+    
+    The expected format is:
+    - Row 1: Stage names in separate columns.
+    - Subsequent Rows: Statuses that map to the stage in that column.
+    """
     if uploaded_file is None: return None, None, None
     try:
-        bytes_data = uploaded_file.getvalue(); stringio = io.StringIO(bytes_data.decode("utf-8", errors='replace'))
-        df_funnel_def = pd.read_csv(stringio, sep='\t', header=None)
+        bytes_data = uploaded_file.getvalue()
+        stringio = io.StringIO(bytes_data.decode("utf-8", errors='replace'))
+        
+        # --- MODIFIED: Use pandas' built-in separator detection ---
+        # The 'sep=None' argument tells pandas to automatically sniff the delimiter.
+        # The 'engine="python"' is required by pandas when sep is not specified.
+        df_funnel_def = pd.read_csv(stringio, sep=None, engine='python', header=None)
+
         parsed_funnel_definition = {}; parsed_ordered_stages = []; ts_col_map = {}
         for col_idx in df_funnel_def.columns:
-            column_data = df_funnel_def[col_idx]; stage_name = column_data.iloc[0]
+            column_data = df_funnel_def[col_idx]
+            # First row is the stage name
+            stage_name = column_data.iloc[0]
             if pd.isna(stage_name) or str(stage_name).strip() == "": continue
-            stage_name = str(stage_name).strip().replace('"', ''); parsed_ordered_stages.append(stage_name)
+            
+            stage_name = str(stage_name).strip().replace('"', '')
+            parsed_ordered_stages.append(stage_name)
+            
+            # Subsequent rows are the statuses
             statuses = column_data.iloc[1:].dropna().astype(str).apply(lambda x: x.strip().replace('"', '')).tolist()
-            statuses = [s for s in statuses if s];
-            if stage_name not in statuses: statuses.append(stage_name)
+            statuses = [s for s in statuses if s]
+            
+            # Ensure the stage name itself is included as a valid status for that stage
+            if stage_name not in statuses:
+                statuses.append(stage_name)
+                
             parsed_funnel_definition[stage_name] = statuses
-            clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"; ts_col_map[stage_name] = clean_ts_name
-        if not parsed_ordered_stages: st.error("Could not parse stages from Funnel Definition."); return None, None, None
+            clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
+            ts_col_map[stage_name] = clean_ts_name
+            
+        if not parsed_ordered_stages:
+            st.error("Could not parse stages from Funnel Definition. Check file format.")
+            return None, None, None
+            
         return parsed_funnel_definition, parsed_ordered_stages, ts_col_map
     except Exception as e:
-        st.error(f"Error parsing Funnel Definition file: {e}"); st.exception(e)
+        st.error(f"Error parsing Funnel Definition file: {e}")
+        st.info("Please ensure the file is a standard CSV or TSV with stage names in the first row.")
+        st.exception(e)
         return None, None, None
 
 def parse_datetime_with_timezone(dt_str):
@@ -1680,7 +1712,7 @@ ai_monthly_ql_capacity_multiplier_sidebar_val = 3.0
 with st.sidebar:
     st.header("⚙️ Setup")
     uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
-    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader_main")
+    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (CSV or TSV)", type=["csv", "tsv"], key="funnel_uploader_main")
     st.divider()
     with st.expander("Historical Ad Spend"):
         st.info("Enter **historical** ad spend for past months. Add rows as needed.")
