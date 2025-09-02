@@ -1711,8 +1711,19 @@ ai_monthly_ql_capacity_multiplier_sidebar_val = 3.0
 
 with st.sidebar:
     st.header("⚙️ Setup")
-    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
-    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (CSV or TSV)", type=["csv", "tsv"], key="funnel_uploader_main")
+    
+    # --- PII Warning and Checkbox ---
+    st.warning("🔒 **Privacy Notice:** Do not upload files containing personally identifiable information (PII).", icon="⚠️")
+    pii_checkbox = st.checkbox("I confirm this file does not contain PII (e.g., Name, Email, Phone, detailed Notes).")
+
+    if pii_checkbox:
+        uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader_main")
+        uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (CSV or TSV)", type=["csv", "tsv"], key="funnel_uploader_main")
+    else:
+        st.info("Please confirm the file does not contain PII to enable file uploads.")
+        uploaded_referral_file = None
+        uploaded_funnel_def_file = None
+        
     st.divider()
     with st.expander("Historical Ad Spend"):
         st.info("Enter **historical** ad spend for past months. Add rows as needed.")
