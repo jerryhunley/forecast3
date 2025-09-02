@@ -1848,26 +1848,53 @@ with st.sidebar:
 # --- Main App Logic & Display ---
 if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
     if not st.session_state.data_processed_successfully:
-        funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
-        if funnel_definition and ordered_stages and ts_col_map:
-            st.session_state.funnel_definition = funnel_definition; st.session_state.ordered_stages = ordered_stages; st.session_state.ts_col_map = ts_col_map
-            try:
-                 bytes_data_ref = uploaded_referral_file.getvalue()
-                 try: decoded_data_ref = bytes_data_ref.decode("utf-8")
-                 except UnicodeDecodeError: decoded_data_ref = bytes_data_ref.decode("latin-1", errors="replace")
-                 stringio_ref = io.StringIO(decoded_data_ref)
-                 try:
-                      referrals_raw_df_main = pd.read_csv(stringio_ref, sep=',', header=0, on_bad_lines='warn', low_memory=False)
-                      st.session_state.referral_data_processed = preprocess_referral_data(referrals_raw_df_main, funnel_definition, ordered_stages, ts_col_map)
-                      if st.session_state.referral_data_processed is not None and not st.session_state.referral_data_processed.empty:
-                           st.session_state.data_processed_successfully = True
-                           st.session_state.inter_stage_lags = calculate_overall_inter_stage_lags(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
-                           st.session_state.site_metrics_calculated = calculate_site_metrics(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
-                      else: st.session_state.data_processed_successfully = False; st.error("Referral data preprocessing failed or returned empty.")
-                 except pd.errors.ParserError as pe: st.error(f"Error parsing referral CSV file: {pe}. Check file format and delimiter."); st.exception(pe)
-                 except Exception as read_err: st.error(f"Error reading referral file: {read_err}"); st.exception(read_err)
-            except Exception as e: st.error(f"Error loading referral data: {e}"); st.exception(e)
-        else: st.error("Funnel definition parsing failed. Cannot proceed with referral data.")
+        # PII Check first
+        pii_check_passed = False
+        try:
+            bytes_data_ref = uploaded_referral_file.getvalue()
+            # Use a separate, resettable IO stream for the PII check
+            stringio_for_pii_check = io.StringIO(bytes_data_ref.decode("utf-8", errors='ignore'))
+            
+            header_df = pd.read_csv(stringio_for_pii_check, nrows=0, on_bad_lines='skip', low_memory=False, sep=',')
+            uploaded_columns_lower = [str(col).lower().strip() for col in header_df.columns]
+            
+            pii_columns_to_check = ["notes", "first name", "last name", "name", "phone", "email"]
+            found_pii_cols = [col for col in pii_columns_to_check if col in uploaded_columns_lower]
+
+            if found_pii_cols:
+                # Find the original column names for the error message
+                original_col_names = [col for col in header_df.columns if str(col).lower().strip() in found_pii_cols]
+                st.error(f"This upload contains potential PII in columns: {', '.join(original_col_names)}. Please upload a document that does not contain any PII.", icon="🚫")
+                st.session_state.data_processed_successfully = False
+            else:
+                pii_check_passed = True
+        except Exception as pii_e:
+            st.error(f"Could not read the referral file header for PII check. Please ensure it is a valid CSV. Error: {pii_e}")
+            pii_check_passed = False
+
+        if pii_check_passed:
+            funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
+            if funnel_definition and ordered_stages and ts_col_map:
+                st.session_state.funnel_definition = funnel_definition
+                st.session_state.ordered_stages = ordered_stages
+                st.session_state.ts_col_map = ts_col_map
+                try:
+                     # bytes_data_ref is already available from the PII check
+                     try: decoded_data_ref = bytes_data_ref.decode("utf-8")
+                     except UnicodeDecodeError: decoded_data_ref = bytes_data_ref.decode("latin-1", errors="replace")
+                     stringio_ref = io.StringIO(decoded_data_ref)
+                     try:
+                          referrals_raw_df_main = pd.read_csv(stringio_ref, sep=',', header=0, on_bad_lines='warn', low_memory=False)
+                          st.session_state.referral_data_processed = preprocess_referral_data(referrals_raw_df_main, funnel_definition, ordered_stages, ts_col_map)
+                          if st.session_state.referral_data_processed is not None and not st.session_state.referral_data_processed.empty:
+                               st.session_state.data_processed_successfully = True
+                               st.session_state.inter_stage_lags = calculate_overall_inter_stage_lags(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
+                               st.session_state.site_metrics_calculated = calculate_site_metrics(st.session_state.referral_data_processed, ordered_stages, ts_col_map)
+                          else: st.session_state.data_processed_successfully = False; st.error("Referral data preprocessing failed or returned empty.")
+                     except pd.errors.ParserError as pe: st.error(f"Error parsing referral CSV file: {pe}. Check file format and delimiter."); st.exception(pe)
+                     except Exception as read_err: st.error(f"Error reading referral file: {read_err}"); st.exception(read_err)
+                except Exception as e: st.error(f"Error loading referral data: {e}"); st.exception(e)
+            else: st.error("Funnel definition parsing failed. Cannot proceed with referral data.")
 
 if st.session_state.data_processed_successfully:
     referral_data_processed = st.session_state.referral_data_processed
