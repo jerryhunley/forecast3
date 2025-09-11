@@ -939,14 +939,15 @@ def calculate_ai_forecast_core(
     ai_lag_method: str = "average",
     ai_lag_p25_days: float = None,
     ai_lag_p50_days: float = None,
-    ai_lag_p75_days: float = None
+    ai_lag_p75_days: float = None,
+    baseline_monthly_ql_volume_override: float = None # <<< FIX: ADDED NEW PARAMETER
 ):
     default_return_ai = pd.DataFrame(), pd.DataFrame(), "N/A", "Not Calculated", True, 0
     days_in_avg_m = 30.4375
 
     if not all([processed_df is not None, not processed_df.empty, ordered_stages, ts_col_map,
                 effective_projection_conv_rates, site_metrics_df is not None]): # site_metrics_df can be empty
-        return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Missing critical base data for AI Forecast.", True, 0
+        return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Missing critical base data for Auto Forecast.", True, 0
     if goal_icf_number_orig <= 0: return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Goal ICF number must be positive.", True, 0
     if estimated_cpql_user <= 0: return default_return_ai[0], default_return_ai[1], default_return_ai[2], "Estimated CPQL must be positive.", True, 0
     if cpql_inflation_factor_pct < 0 or ql_vol_increase_threshold_pct < 0:
@@ -1012,22 +1013,14 @@ def calculate_ai_forecast_core(
         start=max(earliest_permissible_generation_month, projection_calc_months.min()),
         end=min(latest_permissible_generation_month, projection_calc_months.max())
     )
-
-    baseline_monthly_ql_volume = 1.0
-    if ts_pof_col_for_prop and ts_pof_col_for_prop in processed_df.columns and not processed_df.empty and 'Submission_Month' in processed_df.columns:
-        valid_pof_df_baseline = processed_df[processed_df[ts_pof_col_for_prop].notna()]
-        if not valid_pof_df_baseline.empty and 'Submission_Month' in valid_pof_df_baseline:
-            num_unique_hist_months = valid_pof_df_baseline['Submission_Month'].nunique()
-            if num_unique_hist_months > 0:
-                months_for_baseline_calc = min(num_unique_hist_months, 6)
-                recent_hist_months = valid_pof_df_baseline['Submission_Month'].drop_duplicates().nlargest(months_for_baseline_calc)
-                baseline_data_for_avg = valid_pof_df_baseline[valid_pof_df_baseline['Submission_Month'].isin(recent_hist_months)]
-                if not baseline_data_for_avg.empty:
-                    total_pof_baseline_period = baseline_data_for_avg.shape[0]
-                    calculated_baseline = total_pof_baseline_period / months_for_baseline_calc
-                    if calculated_baseline > 0: baseline_monthly_ql_volume = calculated_baseline
+    
+    # <<< FIX: Use the override value if provided, otherwise default to a safe value.
+    # The detailed calculation is now done in the UI to provide a robust value here.
+    baseline_monthly_ql_volume = 50.0
+    if baseline_monthly_ql_volume_override is not None and baseline_monthly_ql_volume_override > 0:
+        baseline_monthly_ql_volume = baseline_monthly_ql_volume_override
+        
     monthly_ql_capacity_target_heuristic = baseline_monthly_ql_volume * ai_monthly_ql_capacity_multiplier
-    if monthly_ql_capacity_target_heuristic < 1: monthly_ql_capacity_target_heuristic = 50
 
     site_level_monthly_qlof = {}
     all_defined_sites = site_metrics_df['Site'].unique() if not site_metrics_df.empty and 'Site' in site_metrics_df else np.array([])
