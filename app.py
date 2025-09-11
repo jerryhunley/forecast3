@@ -1979,6 +1979,8 @@ if st.session_state.data_processed_successfully:
             st.warning("UTM Source column not found in the uploaded data. Ad Performance cannot be calculated.")
         else:
             df_for_ad_perf = referral_data_processed.copy()
+            
+            # --- Start of Table 1: Performance by UTM Source ---
             st.subheader("Performance by UTM Source")
             utm_source_metrics_df = calculate_grouped_performance_metrics(
                 df_for_ad_perf, ordered_stages, ts_col_map,
@@ -1991,68 +1993,94 @@ if st.session_state.data_processed_successfully:
                     utm_source_metrics_df, weights_normalized,
                     group_col_name="UTM Source" 
                 )
-
-        st.markdown("---") # Add a separator
-        st.subheader("Performance by UTM Source & Medium")
-
-        # Check if both required columns exist
-        if "UTM Source" in df_for_ad_perf.columns and "UTM Medium" in df_for_ad_perf.columns:
-            df_for_source_medium = df_for_ad_perf.copy()
-            
-            # Create a combined key for grouping, handling potential missing values
-            df_for_source_medium['UTM Source'] = df_for_source_medium['UTM Source'].astype(str).fillna('Unclassified')
-            df_for_source_medium['UTM Medium'] = df_for_source_medium['UTM Medium'].astype(str).fillna('Unclassified')
-            df_for_source_medium['UTM Source/Medium'] = df_for_source_medium['UTM Source'] + ' / ' + df_for_source_medium['UTM Medium']
-
-            utm_source_medium_metrics_df = calculate_grouped_performance_metrics(
-                df_for_source_medium, ordered_stages, ts_col_map,
-                grouping_cols=["UTM Source/Medium"], 
-                unclassified_label="Unclassified Source / Medium"
-            )
-
-            if not utm_source_medium_metrics_df.empty:
-                ranked_utm_source_medium_df = score_performance_groups(
-                    utm_source_medium_metrics_df, weights_normalized,
-                    group_col_name="UTM Source/Medium" 
-                )
                 
-                # Split the combined column back into two for display
-                if 'UTM Source/Medium' in ranked_utm_source_medium_df.columns:
-                    split_cols = ranked_utm_source_medium_df['UTM Source/Medium'].str.split(' / ', n=1, expand=True)
-                    ranked_utm_source_medium_df['UTM Source'] = split_cols[0]
-                    ranked_utm_source_medium_df['UTM Medium'] = split_cols[1]
-
-                # Define display columns, putting the new split columns at the front
-                display_cols_ad_medium = ['UTM Source', 'UTM Medium', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
+                display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
                                    'Qual to Enrollment %', 'ICF to Enrollment %', 'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
                                    'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
                                    'Avg TTC (Days)', 'Avg Funnel Movement Steps'] 
                 
-                display_cols_ad_medium_exist = [col for col in display_cols_ad_medium if col in ranked_utm_source_medium_df.columns]
-                final_ad_medium_display = ranked_utm_source_medium_df[display_cols_ad_medium_exist].copy()
+                display_cols_ad_exist = [col for col in display_cols_ad if col in ranked_utm_source_df.columns]
+                final_ad_display = ranked_utm_source_df[display_cols_ad_exist].copy()
 
-                if not final_ad_medium_display.empty:
-                    # Apply the same formatting as the other tables
-                    if 'Score' in final_ad_medium_display.columns: final_ad_medium_display['Score'] = final_ad_medium_display['Score'].round(1)
-                    for col_fmt in final_ad_medium_display.columns:
-                        if '%' in col_fmt and final_ad_medium_display[col_fmt].dtype == 'float':
-                            final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
-                        elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_medium_display[col_fmt].dtype == 'float':
-                            final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
-                        elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_medium_display[col_fmt]):
-                            final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
-                    
-                    st.dataframe(final_ad_medium_display.style.format(na_rep='-'))
+                if not final_ad_display.empty:
+                    if 'Score' in final_ad_display.columns: final_ad_display['Score'] = final_ad_display['Score'].round(1)
+                    for col_fmt in final_ad_display.columns:
+                        if '%' in col_fmt and final_ad_display[col_fmt].dtype == 'float':
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
+                        elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_display[col_fmt].dtype == 'float':
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+                        elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_display[col_fmt]):
+                            final_ad_display[col_fmt] = final_ad_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
+                    st.dataframe(final_ad_display.style.format(na_rep='-'))
                     try:
-                        csv_ad_source_medium = final_ad_medium_display.to_csv(index=False).encode('utf-8')
-                        st.download_button(label="Download UTM Source/Medium Performance", data=csv_ad_source_medium, file_name='utm_source_medium_performance.csv', mime='text/csv', key='dl_ad_source_medium_perf_v1')
-                    except Exception as e_dl_adsm: st.warning(f"UTM Source/Medium performance download error: {e_dl_adsm}")
+                        csv_ad_source = final_ad_display.to_csv(index=False).encode('utf-8')
+                        st.download_button(label="Download UTM Source Performance", data=csv_ad_source, file_name='utm_source_performance.csv', mime='text/csv', key='dl_ad_source_perf_v2')
+                    except Exception as e_dl_ads: st.warning(f"UTM Source performance download error: {e_dl_ads}")
+                else: 
+                    st.info("No data to display for UTM Source performance after processing.")
+            else: 
+                st.info("Could not calculate performance metrics for UTM Source.")
+            # --- End of Table 1 ---
+
+            st.markdown("---") # Add a separator between the tables
+
+            # --- Start of Table 2: Performance by UTM Source & Medium ---
+            st.subheader("Performance by UTM Source & Medium")
+
+            if "UTM Medium" in df_for_ad_perf.columns:
+                df_for_source_medium = df_for_ad_perf.copy()
+                
+                df_for_source_medium['UTM Source'] = df_for_source_medium['UTM Source'].astype(str).fillna('Unclassified')
+                df_for_source_medium['UTM Medium'] = df_for_source_medium['UTM Medium'].astype(str).fillna('Unclassified')
+                df_for_source_medium['UTM Source/Medium'] = df_for_source_medium['UTM Source'] + ' / ' + df_for_source_medium['UTM Medium']
+
+                utm_source_medium_metrics_df = calculate_grouped_performance_metrics(
+                    df_for_source_medium, ordered_stages, ts_col_map,
+                    grouping_cols=["UTM Source/Medium"], 
+                    unclassified_label="Unclassified Source / Medium"
+                )
+
+                if not utm_source_medium_metrics_df.empty:
+                    ranked_utm_source_medium_df = score_performance_groups(
+                        utm_source_medium_metrics_df, weights_normalized,
+                        group_col_name="UTM Source/Medium" 
+                    )
+                    
+                    if 'UTM Source/Medium' in ranked_utm_source_medium_df.columns:
+                        split_cols = ranked_utm_source_medium_df['UTM Source/Medium'].str.split(' / ', n=1, expand=True)
+                        ranked_utm_source_medium_df['UTM Source'] = split_cols[0]
+                        ranked_utm_source_medium_df['UTM Medium'] = split_cols[1]
+
+                    display_cols_ad_medium = ['UTM Source', 'UTM Medium', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
+                                       'Qual to Enrollment %', 'ICF to Enrollment %', 'Qual -> ICF %', 'POF -> PSA %', 'PSA -> StS %', 'StS -> Appt %', 'Appt -> ICF %',
+                                       'Lag Qual -> ICF (Days)', 'Projection Lag (Days)', 'Screen Fail % (from ICF)',
+                                       'Avg TTC (Days)', 'Avg Funnel Movement Steps'] 
+                    
+                    display_cols_ad_medium_exist = [col for col in display_cols_ad_medium if col in ranked_utm_source_medium_df.columns]
+                    final_ad_medium_display = ranked_utm_source_medium_df[display_cols_ad_medium_exist].copy()
+
+                    if not final_ad_medium_display.empty:
+                        if 'Score' in final_ad_medium_display.columns: final_ad_medium_display['Score'] = final_ad_medium_display['Score'].round(1)
+                        for col_fmt in final_ad_medium_display.columns:
+                            if '%' in col_fmt and final_ad_medium_display[col_fmt].dtype == 'float':
+                                final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
+                            elif ('Lag' in col_fmt or 'TTC' in col_fmt or 'Steps' in col_fmt) and final_ad_medium_display[col_fmt].dtype == 'float':
+                                final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+                            elif ('Count' in col_fmt or 'Qualified' in col_fmt) and pd.api.types.is_numeric_dtype(final_ad_medium_display[col_fmt]):
+                                final_ad_medium_display[col_fmt] = final_ad_medium_display[col_fmt].apply(lambda x: f"{int(x):,}" if pd.notna(x) and x==x else '-')
+                        
+                        st.dataframe(final_ad_medium_display.style.format(na_rep='-'))
+                        try:
+                            csv_ad_source_medium = final_ad_medium_display.to_csv(index=False).encode('utf-8')
+                            st.download_button(label="Download UTM Source/Medium Performance", data=csv_ad_source_medium, file_name='utm_source_medium_performance.csv', mime='text/csv', key='dl_ad_source_medium_perf_v1')
+                        except Exception as e_dl_adsm: st.warning(f"UTM Source/Medium performance download error: {e_dl_adsm}")
+                    else:
+                        st.info("No data to display for UTM Source/Medium performance after processing.")
                 else:
-                    st.info("No data to display for UTM Source/Medium performance after processing.")
+                    st.info("Could not calculate performance metrics for UTM Source/Medium.")
             else:
-                st.info("Could not calculate performance metrics for UTM Source/Medium.")
-        else:
-            st.warning("'UTM Medium' column not found in the uploaded data. Combined Source/Medium performance cannot be calculated.")
+                st.warning("'UTM Medium' column not found in the uploaded data. Combined Source/Medium performance cannot be calculated.")
+            # --- End of Table 2 ---
                 
                 # --- NEW: Added Enrollment metrics to the display list ---
                 display_cols_ad = ['UTM Source', 'Score', 'Grade', 'Total Qualified', 'PSA Count', 'StS Count', 'Appt Count', 'ICF Count', 'Enrollment Count',
