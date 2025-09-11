@@ -2263,7 +2263,6 @@ if st.session_state.data_processed_successfully:
             try: ai_rolling_window_months_internal_val = int(selected_rate_method_label_ai_tab.split('-')[0])
             except: ai_rolling_window_months_internal_val = 3
         
-        # <<< FIX: Define the manual rates dictionary REGARDLESS of the radio button choice, so it's always available as a fallback.
         ai_manual_conv_rates_tab_input_val = {}
         st.write("Define Manual Conversion Rates for Auto Forecast:") # <<< RENAMED
         ai_cols_rate_man = st.columns(2)
@@ -2388,15 +2387,14 @@ if st.session_state.data_processed_successfully:
                 ai_effective_rates = ai_manual_conv_rates_tab_input_val
                 ai_rates_method_desc = "Manual Input for Auto Forecast"
             else:
-                manual_rates_for_ai_rolling = ai_manual_conv_rates_tab_input_val.copy() # Start with the rates from this tab.
-                manual_rates_for_ai_rolling[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85 # Add required enrollment rate
+                manual_rates_for_ai_rolling = ai_manual_conv_rates_tab_input_val.copy()
+                manual_rates_for_ai_rolling[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85
 
                 ai_effective_rates, ai_rates_method_desc = determine_effective_projection_rates(
                     referral_data_processed, ordered_stages, ts_col_map, ai_rate_assumption_method_internal_val,
                     ai_rolling_window_months_internal_val, manual_rates_for_ai_rolling,
                     inter_stage_lags_data, sidebar_display_area=None )
                 
-                # <<< FIX: The fallback logic now uses the rates from THIS tab, not the sidebar.
                 if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc or not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()):
                     st.warning(f"Could not determine reliable '{selected_rate_method_label_ai_tab}' rates ({ai_rates_method_desc}). Using manual rates defined on this tab as a fallback.")
                     ai_effective_rates = ai_manual_conv_rates_tab_input_val
@@ -2407,6 +2405,23 @@ if st.session_state.data_processed_successfully:
             if pof_ts_col_ai_val and icf_ts_col_ai_val and \
                pof_ts_col_ai_val in referral_data_processed.columns and icf_ts_col_ai_val in referral_data_processed.columns:
                 avg_pof_icf_lag_ai_val = calculate_avg_lag_generic(referral_data_processed, pof_ts_col_ai_val, icf_ts_col_ai_val)
+
+            # <<< FIX: The baseline now has a minimum floor of 50 to prevent it from being too low.
+            baseline_ql_volume_for_calc = 50.0 
+            if ts_pof_col_for_prop and ts_pof_col_for_prop in referral_data_processed.columns and not referral_data_processed.empty and 'Submission_Month' in referral_data_processed.columns:
+                valid_pof_df_baseline = referral_data_processed[referral_data_processed[ts_pof_col_for_prop].notna()]
+                if not valid_pof_df_baseline.empty and 'Submission_Month' in valid_pof_df_baseline:
+                    num_unique_hist_months = valid_pof_df_baseline['Submission_Month'].nunique()
+                    if num_unique_hist_months > 0:
+                        months_for_baseline_calc = min(num_unique_hist_months, 6)
+                        recent_hist_months = valid_pof_df_baseline['Submission_Month'].drop_duplicates().nlargest(months_for_baseline_calc)
+                        baseline_data_for_avg = valid_pof_df_baseline[valid_pof_df_baseline['Submission_Month'].isin(recent_hist_months)]
+                        if not baseline_data_for_avg.empty:
+                            total_pof_baseline_period = baseline_data_for_avg.shape[0]
+                            calculated_baseline = total_pof_baseline_period / months_for_baseline_calc
+                            # Use the calculated baseline only if it's higher than the floor
+                            if calculated_baseline > baseline_ql_volume_for_calc:
+                                baseline_ql_volume_for_calc = calculated_baseline
 
             current_ai_lag_method = "average"
             current_p25, current_p50, current_p75 = None, None, None
@@ -2433,6 +2448,8 @@ if st.session_state.data_processed_successfully:
             else:
                 st.write(f"Auto Forecast using: {lag_source_message_ai_val} Conversion rates based on: {ai_rates_method_desc}")
                 run_mode_for_call_primary_val = "primary"
+                
+                # <<< FIX: Pass the robust baseline_ql_volume_for_calc to the core function
                 ai_results_df_run1, ai_site_df_run1, ai_ads_off_run1, ai_message_run1, ai_unfeasible_run1, ai_actual_icfs_run1 = calculate_ai_forecast_core(
                     goal_lpi_date_dt_orig=ai_goal_lpi_date, goal_icf_number_orig=ai_goal_icf_num,
                     estimated_cpql_user=ai_cpql_estimate, icf_variation_percent=proj_icf_variation_percent_sidebar,
@@ -2449,7 +2466,8 @@ if st.session_state.data_processed_successfully:
                     ai_lag_method=current_ai_lag_method,
                     ai_lag_p25_days=current_p25,
                     ai_lag_p50_days=current_p50,
-                    ai_lag_p75_days=current_p75
+                    ai_lag_p75_days=current_p75,
+                    baseline_monthly_ql_volume_override=baseline_ql_volume_for_calc # Pass the fixed value
                 )
 
                 st.session_state.ai_forecast_results = {
@@ -2478,7 +2496,8 @@ if st.session_state.data_processed_successfully:
                         ai_lag_method=current_ai_lag_method,
                         ai_lag_p25_days=current_p25,
                         ai_lag_p50_days=current_p50,
-                        ai_lag_p75_days=current_p75
+                        ai_lag_p75_days=current_p75,
+                        baseline_monthly_ql_volume_override=baseline_ql_volume_for_calc # Pass the fixed value
                     )
 
                     st.session_state.ai_forecast_results = {
@@ -2486,6 +2505,7 @@ if st.session_state.data_processed_successfully:
                         'message': ai_message_run2, 'unfeasible': ai_unfeasible_run2, 'actual_icfs': ai_actual_icfs_run2,
                         'lpi_goal': ai_goal_lpi_date, 'icf_goal': ai_goal_icf_num, 'run_mode_displayed': run_mode_for_call_best_case_val
                     }
+        # ... (rest of the display logic for the tab remains the same) ...
 
         if st.session_state.get('ai_forecast_results'):
             results_ai_tab = st.session_state.ai_forecast_results
