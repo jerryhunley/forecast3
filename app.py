@@ -2081,6 +2081,133 @@ if st.session_state.data_processed_successfully:
             else:
                 st.warning("'UTM Medium' column not found in the uploaded data. Combined Source/Medium performance cannot be calculated.")
             # --- End of Table 2 ---
+    with tab_projections: 
+        st.header("Projections (Based on Future Spend)")
+        effective_proj_rates_tab3, method_desc_tab3 = determine_effective_projection_rates(
+            referral_data_processed, ordered_stages, ts_col_map, rate_assumption_method_sidebar,
+            rolling_window_months_sidebar, manual_proj_conv_rates_sidebar, inter_stage_lags_data, sidebar_display_area=None)
+        st.caption(f"**Projection Using: {method_desc_tab3} Conversion Rates**")
+        if "Rolling" in method_desc_tab3 and not any(s in method_desc_tab3 for s in ["Failed", "No History", "Error"]):
+            if isinstance(effective_proj_rates_tab3, dict) and effective_proj_rates_tab3:
+                st.markdown("---"); st.write("Effective Rolling Rates Applied for this Projection (Adj. & Matured):")
+                for key_r, val_r in effective_proj_rates_tab3.items():
+                     if key_r in manual_proj_conv_rates_sidebar: st.text(f"- {key_r}: {val_r*100:.1f}%")
+        st.markdown("---")
+        with st.expander("View Calculated Average Inter-Stage Lags & Maturity Periods Used (for Rolling Rates)"):
+            if inter_stage_lags_data:
+                lag_df_list_tab3 = []
+                temp_maturity_periods_display_tab3 = {}
+                display_maturity_lag_multiplier_tab3 = 1.5; display_min_effective_maturity_tab3 = 20; display_default_maturity_tab3 = 45
+                
+                # Use the full manual rates dict to ensure all keys are checked
+                manual_rates_with_enroll_tab3 = manual_proj_conv_rates_sidebar.copy()
+                manual_rates_with_enroll_tab3[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85 # Default
+                
+                if inter_stage_lags_data:
+                    for r_key_disp_tab3 in manual_rates_with_enroll_tab3.keys():
+                        avg_lag_disp_tab3 = inter_stage_lags_data.get(r_key_disp_tab3)
+                        if pd.notna(avg_lag_disp_tab3) and avg_lag_disp_tab3 > 0:
+                            calc_mat_disp_tab3 = round(display_maturity_lag_multiplier_tab3 * avg_lag_disp_tab3)
+                            temp_maturity_periods_display_tab3[r_key_disp_tab3] = max(calc_mat_disp_tab3, display_min_effective_maturity_tab3)
+                        else: temp_maturity_periods_display_tab3[r_key_disp_tab3] = display_default_maturity_tab3
+                for key_lag, val_lag in inter_stage_lags_data.items():
+                    maturity_p_disp_tab3 = temp_maturity_periods_display_tab3.get(key_lag, "N/A (Not a projection rate segment)")
+                    lag_df_list_tab3.append({'Stage Transition': key_lag, 'Avg Lag (Days)': f"{val_lag:.1f}" if pd.notna(val_lag) else "N/A", 'Implied Maturity Used (Days)': f"{maturity_p_disp_tab3}" if isinstance(maturity_p_disp_tab3, (int, float)) else maturity_p_disp_tab3})
+                if lag_df_list_tab3: st.table(pd.DataFrame(lag_df_list_tab3))
+                else: st.caption("No inter-stage lags calculated or available to determine maturity periods.")
+            else: st.caption("Inter-stage lags have not been calculated (required for rolling rate maturity).")
+        st.markdown("---")
+        projection_inputs_tab3 = {
+            'horizon': proj_horizon_sidebar, 'spend_dict': proj_spend_dict_sidebar,
+            'cpqr_dict': proj_cpqr_dict_sidebar, 'final_conv_rates': effective_proj_rates_tab3,
+            'goal_icf': goal_icf_count_sidebar, 'site_performance_data': site_metrics_calculated_data,
+            'inter_stage_lags': inter_stage_lags_data, 'icf_variation_percentage': proj_icf_variation_percent_sidebar
+        }
+        projection_results_df_tab3, avg_lag_used_tab3, lpi_date_tab3, ads_off_tab3, site_level_proj_tab3, lag_msg_tab3 = calculate_projections(
+            referral_data_processed, ordered_stages, ts_col_map, projection_inputs_tab3
+        )
+        st.markdown("---")
+        col1_info_tab3, col2_info_tab3, col3_info_tab3 = st.columns(3)
+        with col1_info_tab3: st.metric(label="Goal Total ICFs (Projections Tab)", value=f"{goal_icf_count_sidebar:,}")
+        with col2_info_tab3: st.metric(label="Estimated LPI Date", value=lpi_date_tab3)
+        with col3_info_tab3: st.metric(label="Estimated Ads Off Date", value=ads_off_tab3)
+        if pd.notna(avg_lag_used_tab3): st.caption(f"Lag applied in projections: **{avg_lag_used_tab3:.1f} days**. ({lag_msg_tab3})")
+        else: st.caption(f"Lag could not be determined. ({lag_msg_tab3})")
+        st.markdown("---")
+        if projection_results_df_tab3 is not None and not projection_results_df_tab3.empty:
+            st.subheader("Projected Monthly ICFs & Cohort CPICF")
+            cols_to_check_cpicf_tab3 = ['Projected_CPICF_Cohort_Source_Low', 'Projected_CPICF_Cohort_Source_Mean', 'Projected_CPICF_Cohort_Source_High']
+            base_display_cols_proj_tab3 = ['Forecasted_Ad_Spend', 'Forecasted_Qual_Referrals', 'Projected_ICF_Landed']
+            results_display_tab3 = projection_results_df_tab3.copy()
+            if all(c in results_display_tab3.columns for c in cols_to_check_cpicf_tab3):
+                results_display_tab3['Projected CPICF (Low-Mean-High)'] = results_display_tab3.apply(
+                    lambda row: (f"${row['Projected_CPICF_Cohort_Source_Low']:,.2f} - ${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} - ${row['Projected_CPICF_Cohort_Source_High']:,.2f}"
+                                 if pd.notna(row['Projected_CPICF_Cohort_Source_Low']) and pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) and pd.notna(row['Projected_CPICF_Cohort_Source_High'])
+                                 else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f} (Range N/A)" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"))
+                                if proj_icf_variation_percent_sidebar > 0 else (f"${row['Projected_CPICF_Cohort_Source_Mean']:,.2f}" if pd.notna(row['Projected_CPICF_Cohort_Source_Mean']) else "-"), axis=1)
+                final_display_cols_proj_tab3 = base_display_cols_proj_tab3 + ['Projected CPICF (Low-Mean-High)']
+            elif 'Projected_CPICF_Cohort_Source_Mean' in results_display_tab3.columns:
+                results_display_tab3.rename(columns={'Projected_CPICF_Cohort_Source_Mean': 'Projected CPICF (Mean)'}, inplace=True)
+                results_display_tab3['Projected CPICF (Mean)'] = results_display_tab3['Projected CPICF (Mean)'].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else '-')
+                final_display_cols_proj_tab3 = base_display_cols_proj_tab3 + ['Projected CPICF (Mean)']
+            else: final_display_cols_proj_tab3 = base_display_cols_proj_tab3
+            results_display_filtered_tab3 = results_display_tab3[[col for col in final_display_cols_proj_tab3 if col in results_display_tab3.columns]].copy()
+            if not results_display_filtered_tab3.empty:
+                results_display_filtered_tab3.index = results_display_filtered_tab3.index.strftime('%Y-%m')
+                for col_name_fmt_tab3 in results_display_filtered_tab3.columns:
+                    if 'Ad_Spend' in col_name_fmt_tab3: results_display_filtered_tab3[col_name_fmt_tab3] = results_display_filtered_tab3[col_name_fmt_tab3].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int,float)) and pd.notna(x) else (x if isinstance(x, str) else '-'))
+                    elif 'Qual_Referrals' in col_name_fmt_tab3 or 'ICF_Landed' in col_name_fmt_tab3 : results_display_filtered_tab3[col_name_fmt_tab3] = results_display_filtered_tab3[col_name_fmt_tab3].apply(lambda x: f"{int(x):,}" if pd.notna(x) and isinstance(x, (int,float)) and x==x else (x if isinstance(x,str) else '-'))
+                st.dataframe(results_display_filtered_tab3.style.format(na_rep='-'))
+                if proj_icf_variation_percent_sidebar > 0 and 'Projected CPICF (Low-Mean-High)' in results_display_filtered_tab3.columns:
+                    st.caption(f"Note: CPICF range based on +/- {proj_icf_variation_percent_sidebar}% ICF variation (set in sidebar).")
+                if 'Projected_ICF_Landed' in projection_results_df_tab3.columns:
+                     st.subheader("Projected ICFs Landed Over Time (Projections Tab)"); chart_data_tab3 = projection_results_df_tab3[['Projected_ICF_Landed']].copy()
+                     if isinstance(chart_data_tab3.index, pd.PeriodIndex): chart_data_tab3.index = chart_data_tab3.index.to_timestamp()
+                     chart_data_tab3['Projected_ICF_Landed'] = pd.to_numeric(chart_data_tab3['Projected_ICF_Landed'], errors='coerce').fillna(0)
+                     st.line_chart(chart_data_tab3)
+                try: csv_tab3_proj = results_display_filtered_tab3.reset_index().to_csv(index=False).encode('utf-8'); st.download_button(label="Download Projection Data", data=csv_tab3_proj, file_name='projection_spend_based.csv', mime='text/csv', key='dl_proj_v2')
+                except Exception as e_dl3: st.warning(f"Projection download error: {e_dl3}")
+            else: st.warning("Projection results table is empty after selecting columns.")
+        else: st.warning("Could not calculate projections for Projections Tab.")
+        st.markdown("---"); st.subheader("Site-Level Monthly Projections (Projections Tab - Editable)")
+        if site_level_proj_tab3 is not None and not site_level_proj_tab3.empty:
+            df_for_editor_tab3 = site_level_proj_tab3.copy()
+            if df_for_editor_tab3.index.name == 'Site': df_for_editor_tab3.reset_index(inplace=True)
+            grand_total_row_tab3 = None
+            if 'Site' in df_for_editor_tab3.columns and "Grand Total" in df_for_editor_tab3['Site'].values:
+                grand_total_row_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] == "Grand Total"].copy()
+                df_for_editor_tab3 = df_for_editor_tab3[df_for_editor_tab3['Site'] != "Grand Total"].copy()
+            elif "Grand Total" in df_for_editor_tab3.index:
+                grand_total_row_tab3 = df_for_editor_tab3.loc[["Grand Total"]].copy()
+                df_for_editor_tab3 = df_for_editor_tab3.drop(index="Grand Total", errors='ignore')
+            if isinstance(df_for_editor_tab3.columns, pd.MultiIndex):
+                df_for_editor_tab3.columns = [f"{col[1]} ({col[0]})" for col in df_for_editor_tab3.columns]
+                if grand_total_row_tab3 is not None and isinstance(grand_total_row_tab3.columns, pd.MultiIndex):
+                     grand_total_row_tab3.columns = [f"{col[1]} ({col[0]})" for col in grand_total_row_tab3.columns]
+            if 'Site' in df_for_editor_tab3.columns:
+                cols_ordered_tab3 = ['Site'] + [col for col in df_for_editor_tab3.columns if col != 'Site']
+                df_for_editor_tab3 = df_for_editor_tab3[cols_ordered_tab3]
+            st.caption("Edit projected QLs or ICFs per site per month. Note: Totals below are based on initial calculation.")
+            edited_site_level_df_tab3 = st.data_editor(df_for_editor_tab3, use_container_width=True, key="site_level_editor_v3_tab3", num_rows="dynamic")
+            if grand_total_row_tab3 is not None and not grand_total_row_tab3.empty:
+                st.caption("Totals (based on initial calculation, not live edits from above table):")
+                grand_total_row_tab3_display = grand_total_row_tab3.copy()
+                if 'Site' not in grand_total_row_tab3_display.columns:
+                    if grand_total_row_tab3_display.index.name == 'Site' or "Grand Total" in grand_total_row_tab3_display.index:
+                         grand_total_row_tab3_display = grand_total_row_tab3_display.reset_index()
+                         if grand_total_row_tab3_display.columns[0] == 'index':
+                             grand_total_row_tab3_display.rename(columns={'index':'Site'}, inplace=True)
+                if 'Site' in grand_total_row_tab3_display.columns:
+                    gt_cols_ordered_tab3 = ['Site'] + [col for col in grand_total_row_tab3_display.columns if col != 'Site']
+                    grand_total_row_tab3_display = grand_total_row_tab3_display[gt_cols_ordered_tab3]
+                numeric_cols_gt_tab3 = grand_total_row_tab3_display.select_dtypes(include=np.number).columns
+                formatters_gt_tab3 = {col: "{:,.0f}" for col in numeric_cols_gt_tab3}
+                st.dataframe(grand_total_row_tab3_display.style.format(formatters_gt_tab3, na_rep='0'), use_container_width=True)
+            try:
+                csv_site_proj_tab3 = edited_site_level_df_tab3.to_csv(index=False).encode('utf-8')
+                st.download_button(label="Download Edited Site Projections (Tab 3)", data=csv_site_proj_tab3, file_name='edited_site_level_projections_tab3.csv', mime='text/csv', key='dl_edited_site_proj_tab3_v2')
+            except Exception as e_dl_site3: st.warning(f"Site projection (Tab 3) download error: {e_dl_site3}")
+        else: st.info("Site-level projection data (Projections Tab) is not available or is empty.")
 
     # --- NEW: FUNNEL ANALYSIS TAB ---
     with tab_funnel_analysis:
