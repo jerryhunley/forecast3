@@ -2401,6 +2401,8 @@ if st.session_state.data_processed_successfully:
 
             # <<< FIX: The baseline now has a minimum floor of 50 to prevent it from being too low.
             baseline_ql_volume_for_calc = 50.0 
+            # <<< FIX: Define ts_pof_col_for_prop before using it to fix NameError
+            ts_pof_col_for_prop = ts_col_map.get(STAGE_PASSED_ONLINE_FORM)
             if ts_pof_col_for_prop and ts_pof_col_for_prop in referral_data_processed.columns and not referral_data_processed.empty and 'Submission_Month' in referral_data_processed.columns:
                 valid_pof_df_baseline = referral_data_processed[referral_data_processed[ts_pof_col_for_prop].notna()]
                 if not valid_pof_df_baseline.empty and 'Submission_Month' in valid_pof_df_baseline:
@@ -2498,8 +2500,7 @@ if st.session_state.data_processed_successfully:
                         'message': ai_message_run2, 'unfeasible': ai_unfeasible_run2, 'actual_icfs': ai_actual_icfs_run2,
                         'lpi_goal': ai_goal_lpi_date, 'icf_goal': ai_goal_icf_num, 'run_mode_displayed': run_mode_for_call_best_case_val
                     }
-        # ... (rest of the display logic for the tab remains the same) ...
-
+        
         if st.session_state.get('ai_forecast_results'):
             results_ai_tab = st.session_state.ai_forecast_results
             ai_results_df_display = results_ai_tab['df']
