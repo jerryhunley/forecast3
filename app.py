@@ -2213,8 +2213,8 @@ if st.session_state.data_processed_successfully:
     with tab_funnel_analysis:
         render_funnel_analysis_tab()
 
-    with tab_ai_forecast:
-        st.header("AI Forecast (Goal-Based)")
+        with tab_ai_forecast:
+        st.header("🤖 Auto Forecast (Goal-Based)") # <<< RENAMED
         st.info("""
         Define your recruitment goals. The tool will estimate a monthly plan using a 'frontloading' strategy
         (prioritizing earlier months for activity, up to a monthly capacity) to meet your LPI.
@@ -2235,7 +2235,7 @@ if st.session_state.data_processed_successfully:
         with ai_cols_goals[2]:
             ai_cpql_estimate = st.number_input("Base Estimated CPQL (POF)", min_value=1.0, value=75.0, step=5.0, format="%.2f", key="ai_cpql_v3", help="Your average cost for a 'Passed Online Form' lead. This may be adjusted by inflation settings.")
 
-        st.markdown("---"); st.subheader("AI Forecast Assumptions")
+        st.markdown("---"); st.subheader("Auto Forecast Assumptions") # <<< RENAMED
 
         ai_lag_assumption_method = st.radio(
             "ICF Landing Lag Assumption:",
@@ -2254,23 +2254,24 @@ if st.session_state.data_processed_successfully:
                     st.warning("P25 lag should be <= P50, and P50 should be <= P75 for logical distribution.")
 
         rate_options_ai_display = {"Manual Input Below": "Manual Input Below", "Overall Historical Average": "Overall Historical", "1-Month Rolling Avg.": "1-Month Rolling", "3-Month Rolling Avg.": "3-Month Rolling", "6-Month Rolling Avg.": "6-Month Rolling"}
-        selected_rate_method_label_ai_tab = st.radio("Base AI Forecast Conversion Rates On:", options=list(rate_options_ai_display.keys()), index=4, key="ai_rate_method_radio_v3", horizontal=True)
+        selected_rate_method_label_ai_tab = st.radio("Base Auto Forecast Conversion Rates On:", options=list(rate_options_ai_display.keys()), index=4, key="ai_rate_method_radio_v3", horizontal=True) # <<< RENAMED
         ai_rate_assumption_method_internal_val = "Manual Input Below"; ai_rolling_window_months_internal_val = 0
         if selected_rate_method_label_ai_tab == "Overall Historical Average": ai_rate_assumption_method_internal_val = "Rolling Historical Average"; ai_rolling_window_months_internal_val = 999
         elif "Rolling" in selected_rate_method_label_ai_tab:
             ai_rate_assumption_method_internal_val = "Rolling Historical Average"
             try: ai_rolling_window_months_internal_val = int(selected_rate_method_label_ai_tab.split('-')[0])
             except: ai_rolling_window_months_internal_val = 3
+        
+        # <<< FIX: Define the manual rates dictionary REGARDLESS of the radio button choice, so it's always available as a fallback.
         ai_manual_conv_rates_tab_input_val = {}
-        if selected_rate_method_label_ai_tab == "Manual Input Below":
-            st.write("Define Manual Conversion Rates for AI Forecast:")
-            ai_cols_rate_man = st.columns(2)
-            with ai_cols_rate_man[0]:
-                 ai_manual_conv_rates_tab_input_val[f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}"] = st.slider("AI: POF -> PreScreen %", 0.0, 100.0, 90.0, step=0.1, format="%.1f%%", key='ai_cr_qps_v5') / 100.0
-                 ai_manual_conv_rates_tab_input_val[f"{STAGE_PRE_SCREENING_ACTIVITIES} -> {STAGE_SENT_TO_SITE}"] = st.slider("AI: PreScreen -> StS %", 0.0, 100.0, 25.0, step=0.1, format="%.1f%%", key='ai_cr_pssts_v5') / 100.0
-            with ai_cols_rate_man[1]:
-                 ai_manual_conv_rates_tab_input_val[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("AI: StS -> Appt %", 0.0, 100.0, 50.0, step=0.1, format="%.1f%%", key='ai_cr_sa_v5') / 100.0
-                 ai_manual_conv_rates_tab_input_val[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("AI: Appt -> ICF %", 0.0, 100.0, 60.0, step=0.1, format="%.1f%%", key='ai_cr_ai_v5') / 100.0
+        st.write("Define Manual Conversion Rates for Auto Forecast:") # <<< RENAMED
+        ai_cols_rate_man = st.columns(2)
+        with ai_cols_rate_man[0]:
+                ai_manual_conv_rates_tab_input_val[f"{STAGE_PASSED_ONLINE_FORM} -> {STAGE_PRE_SCREENING_ACTIVITIES}"] = st.slider("Auto: POF -> PreScreen %", 0.0, 100.0, 90.0, step=0.1, format="%.1f%%", key='ai_cr_qps_v5') / 100.0
+                ai_manual_conv_rates_tab_input_val[f"{STAGE_PRE_SCREENING_ACTIVITIES} -> {STAGE_SENT_TO_SITE}"] = st.slider("Auto: PreScreen -> StS %", 0.0, 100.0, 25.0, step=0.1, format="%.1f%%", key='ai_cr_pssts_v5') / 100.0
+        with ai_cols_rate_man[1]:
+                ai_manual_conv_rates_tab_input_val[f"{STAGE_SENT_TO_SITE} -> {STAGE_APPOINTMENT_SCHEDULED}"] = st.slider("Auto: StS -> Appt %", 0.0, 100.0, 50.0, step=0.1, format="%.1f%%", key='ai_cr_sa_v5') / 100.0
+                ai_manual_conv_rates_tab_input_val[f"{STAGE_APPOINTMENT_SCHEDULED} -> {STAGE_SIGNED_ICF}"] = st.slider("Auto: Appt -> ICF %", 0.0, 100.0, 60.0, step=0.1, format="%.1f%%", key='ai_cr_ai_v5') / 100.0
 
         st.markdown("---")
 
@@ -2288,12 +2289,11 @@ if st.session_state.data_processed_successfully:
                 })
 
             if site_activity_editor_data_list:
-                # Initialize session state for the data editor if it doesn't exist
                 if 'edited_site_activity_df' not in st.session_state:
                     st.session_state.edited_site_activity_df = pd.DataFrame(site_activity_editor_data_list)
                 
                 edited_site_activity_df_ui = st.data_editor(
-                    st.session_state.edited_site_activity_df, # Use session state here
+                    st.session_state.edited_site_activity_df,
                     key="ai_site_activity_editor_v1", 
                     use_container_width=True,
                     column_config={
@@ -2303,10 +2303,8 @@ if st.session_state.data_processed_successfully:
                     },
                     num_rows="dynamic" 
                 )
-                # Update session state if the dataframe has been changed by the user
                 if not edited_site_activity_df_ui.equals(st.session_state.edited_site_activity_df):
                     st.session_state.edited_site_activity_df = edited_site_activity_df_ui
-
 
                 if edited_site_activity_df_ui is not None:
                     for _, row_act_val in edited_site_activity_df_ui.iterrows():
@@ -2355,12 +2353,11 @@ if st.session_state.data_processed_successfully:
             
             if site_cap_editor_data_list:
                 st.caption("Set a maximum number of 'Passed Online Form' (POF) leads a site can handle per month. Leave blank for no cap.")
-                # Initialize session state for the site caps editor
                 if 'edited_site_caps_df_ai_val' not in st.session_state:
                     st.session_state.edited_site_caps_df_ai_val = pd.DataFrame(site_cap_editor_data_list)
 
                 edited_site_caps_df_ai_val_ui = st.data_editor( 
-                    st.session_state.edited_site_caps_df_ai_val, # Use session state
+                    st.session_state.edited_site_caps_df_ai_val,
                     key="ai_site_caps_editor_v3", 
                     use_container_width=True,
                     column_config={ 
@@ -2373,7 +2370,6 @@ if st.session_state.data_processed_successfully:
                 if not edited_site_caps_df_ai_val_ui.equals(st.session_state.edited_site_caps_df_ai_val):
                      st.session_state.edited_site_caps_df_ai_val = edited_site_caps_df_ai_val_ui
 
-
                 if edited_site_caps_df_ai_val_ui is not None:
                     for _, row_cap_ai_val in edited_site_caps_df_ai_val_ui.iterrows():
                         if pd.notna(row_cap_ai_val["Monthly POF Cap"]) and row_cap_ai_val["Monthly POF Cap"] >= 0:
@@ -2382,28 +2378,28 @@ if st.session_state.data_processed_successfully:
         else: st.caption("Site performance data or referral data not available for setting caps.")
         st.markdown("---")
 
-        if st.button("🚀 Generate AI Forecast", key="run_ai_forecast_v5"):
+        if st.button("🚀 Generate Auto Forecast", key="run_ai_forecast_v5"): # <<< RENAMED
             st.session_state.ai_forecast_results = None
             for key_debug in ['ai_gen_df_debug_primary', 'ai_results_df_debug_primary', 'ai_gen_df_debug_best_case', 'ai_results_df_debug_best_case']:
                 if key_debug in st.session_state: del st.session_state[key_debug]
 
             if selected_rate_method_label_ai_tab == "Manual Input Below":
                 ai_effective_rates = ai_manual_conv_rates_tab_input_val
-                ai_rates_method_desc = "Manual Input for AI Forecast"
+                ai_rates_method_desc = "Manual Input for Auto Forecast"
             else:
-                # Add all possible rates to the manual dict so rolling calc can find them
-                manual_rates_for_ai_rolling = manual_proj_conv_rates_sidebar.copy()
-                manual_rates_for_ai_rolling.update(ai_manual_conv_rates_tab_input_val)
-                manual_rates_for_ai_rolling[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85
+                manual_rates_for_ai_rolling = ai_manual_conv_rates_tab_input_val.copy() # Start with the rates from this tab.
+                manual_rates_for_ai_rolling[f"{STAGE_SIGNED_ICF} -> {STAGE_ENROLLED}"] = 0.85 # Add required enrollment rate
 
                 ai_effective_rates, ai_rates_method_desc = determine_effective_projection_rates(
                     referral_data_processed, ordered_stages, ts_col_map, ai_rate_assumption_method_internal_val,
                     ai_rolling_window_months_internal_val, manual_rates_for_ai_rolling,
                     inter_stage_lags_data, sidebar_display_area=None )
+                
+                # <<< FIX: The fallback logic now uses the rates from THIS tab, not the sidebar.
                 if "Error" in ai_rates_method_desc or "Failed" in ai_rates_method_desc or "No History" in ai_rates_method_desc or not ai_effective_rates or all(v == 0 for v in ai_effective_rates.values()):
-                    st.warning(f"Could not determine reliable '{selected_rate_method_label_ai_tab}' rates for AI Forecast ({ai_rates_method_desc}). Using manual rates from Projections Tab sidebar as fallback.")
-                    ai_effective_rates = manual_proj_conv_rates_sidebar
-                    ai_rates_method_desc = f"Manual (Fallback from Projections Tab Sidebar due to issue with '{selected_rate_method_label_ai_tab}')"
+                    st.warning(f"Could not determine reliable '{selected_rate_method_label_ai_tab}' rates ({ai_rates_method_desc}). Using manual rates defined on this tab as a fallback.")
+                    ai_effective_rates = ai_manual_conv_rates_tab_input_val
+                    ai_rates_method_desc = f"Manual (Fallback from this tab due to issue with '{selected_rate_method_label_ai_tab}')"
 
             pof_ts_col_ai_val = ts_col_map.get(STAGE_PASSED_ONLINE_FORM); icf_ts_col_ai_val = ts_col_map.get(STAGE_SIGNED_ICF)
             avg_pof_icf_lag_ai_val = np.nan
@@ -2430,11 +2426,11 @@ if st.session_state.data_processed_successfully:
 
             if (current_ai_lag_method == "average" and pd.isna(avg_pof_icf_lag_ai_val)) or \
                (current_ai_lag_method == "percentiles" and not all([current_p25 is not None, current_p50 is not None, current_p75 is not None])):
-                 st.error("Cannot run AI Forecast: Lag parameters are not correctly set.")
+                 st.error("Cannot run Auto Forecast: Lag parameters are not correctly set.")
             elif not ai_effective_rates or all(r == 0 for r in ai_effective_rates.values()):
-                st.error("Cannot run AI Forecast: Effective conversion rates are zero or unavailable.")
+                st.error("Cannot run Auto Forecast: Effective conversion rates are zero or unavailable.")
             else:
-                st.write(f"AI Forecast using: {lag_source_message_ai_val} Conversion rates based on: {ai_rates_method_desc}")
+                st.write(f"Auto Forecast using: {lag_source_message_ai_val} Conversion rates based on: {ai_rates_method_desc}")
                 run_mode_for_call_primary_val = "primary"
                 ai_results_df_run1, ai_site_df_run1, ai_ads_off_run1, ai_message_run1, ai_unfeasible_run1, ai_actual_icfs_run1 = calculate_ai_forecast_core(
                     goal_lpi_date_dt_orig=ai_goal_lpi_date, goal_icf_number_orig=ai_goal_icf_num,
@@ -2462,7 +2458,7 @@ if st.session_state.data_processed_successfully:
                 }
 
                 if ai_unfeasible_run1:
-                    st.info(f"Initial AI forecast: {ai_message_run1}. Attempting best-case scenario by extending LPI to max projection horizon.")
+                    st.info(f"Initial Auto forecast: {ai_message_run1}. Attempting best-case scenario by extending LPI to max projection horizon.")
                     run_mode_for_call_best_case_val = "best_case_extended_lpi"
                     ai_results_df_run2, ai_site_df_run2, ai_ads_off_run2, ai_message_run2, ai_unfeasible_run2, ai_actual_icfs_run2 = calculate_ai_forecast_core(
                         goal_lpi_date_dt_orig=ai_goal_lpi_date,
@@ -2473,7 +2469,7 @@ if st.session_state.data_processed_successfully:
                         avg_overall_lag_days=avg_pof_icf_lag_ai_val,
                         site_metrics_df=site_metrics_calculated_data, projection_horizon_months=proj_horizon_sidebar,
                         site_caps_input=default_site_caps_ai_input_val,
-                        site_activity_schedule=default_site_activity_schedule_input, # NEW
+                        site_activity_schedule=default_site_activity_schedule_input,
                         site_scoring_weights_for_ai=weights_normalized,
                         cpql_inflation_factor_pct=ai_cpql_inflation_factor_sidebar, ql_vol_increase_threshold_pct=ai_ql_volume_threshold_sidebar,
                         run_mode=run_mode_for_call_best_case_val,
@@ -2517,7 +2513,7 @@ if st.session_state.data_processed_successfully:
             ai_col3_res.metric("Est. Ads Off Date (Generation)", ai_ads_off_display if ai_ads_off_display != "N/A" else "Past LPI/Goal Unmet")
 
             if ai_results_df_display is not None and not ai_results_df_display.empty:
-                st.subheader("AI Forecasted Monthly Performance")
+                st.subheader("Auto Forecasted Monthly Performance") # <<< RENAMED
                 ai_display_df_res_fmt = ai_results_df_display.copy();
                 if isinstance(ai_display_df_res_fmt.index, pd.PeriodIndex): ai_display_df_res_fmt.index = ai_display_df_res_fmt.index.strftime('%Y-%m')
                 if 'Target_QLs_POF' in ai_display_df_res_fmt.columns: ai_display_df_res_fmt.rename(columns={'Target_QLs_POF': 'Planned QLs (POF)'}, inplace=True)
@@ -2541,22 +2537,21 @@ if st.session_state.data_processed_successfully:
                     elif 'Planned QLs (POF)' in col_n_ai_res_fmt or 'ICF_Landed' in col_n_ai_res_fmt: ai_display_df_filtered_res_fmt[col_n_ai_res_fmt] = ai_display_df_filtered_res_fmt[col_n_ai_res_fmt].apply(lambda x_fmt: f"{int(x_fmt):,}" if pd.notna(x_fmt) and isinstance(x_fmt,(int,float)) and x_fmt==x_fmt else (x_fmt if isinstance(x_fmt,str) else '-'))
                 st.dataframe(ai_display_df_filtered_res_fmt.style.format(na_rep='-'))
                 
-                # The incomplete line is now corrected and joined with the subsequent code.
                 if proj_icf_variation_percent_sidebar > 0 and 'Projected CPICF (Low-Mean-High)' in ai_display_df_filtered_res_fmt.columns:
                     st.caption(f"Note: CPICF range based on +/- {proj_icf_variation_percent_sidebar}% ICF variation (set in sidebar).")
 
                 if 'Projected_ICF_Landed' in ai_results_df_display.columns:
-                    st.subheader("Projected ICFs Landed Over Time (AI Forecast)")
+                    st.subheader("Projected ICFs Landed Over Time (Auto Forecast)") # <<< RENAMED
                     ai_chart_data_res_val = ai_results_df_display[['Projected_ICF_Landed']].copy()
                     if isinstance(ai_chart_data_res_val.index, pd.PeriodIndex): ai_chart_data_res_val.index = ai_chart_data_res_val.index.to_timestamp()
                     ai_chart_data_res_val['Projected_ICF_Landed'] = pd.to_numeric(ai_chart_data_res_val['Projected_ICF_Landed'], errors='coerce').fillna(0)
                     st.line_chart(ai_chart_data_res_val)
                     
             elif ai_message_display and "Not Calculated" not in ai_message_display and "Missing critical base data" not in ai_message_display : 
-                st.info(f"AI Forecast calculation did not produce a monthly performance table. Status: {ai_message_display}")
+                st.info(f"Auto Forecast calculation did not produce a monthly performance table. Status: {ai_message_display}")
 
             if ai_site_df_display is not None and not ai_site_df_display.empty:
-                st.subheader("AI Forecasted Site-Level Performance")
+                st.subheader("Auto Forecasted Site-Level Performance") # <<< RENAMED
                 ai_site_df_displayable_res_fmt = ai_site_df_display.copy()
                 if ai_site_df_displayable_res_fmt.index.name != 'Site' and 'Site' in ai_site_df_displayable_res_fmt.columns: ai_site_df_displayable_res_fmt.set_index('Site', inplace=True)
                 elif ai_site_df_displayable_res_fmt.index.name != 'Site' and 'Site' not in ai_site_df_displayable_res_fmt.columns and "Grand Total" in ai_site_df_displayable_res_fmt.index : ai_site_df_displayable_res_fmt.index.name = 'Site'
@@ -2575,9 +2570,9 @@ if st.session_state.data_processed_successfully:
                         except ValueError: formatted_site_df_ai_res_val[col_site_ai_name_res_fmt] = formatted_site_df_ai_res_val[col_site_ai_name_res_fmt].astype(str)
                 st.dataframe(formatted_site_df_ai_res_val.style.format(na_rep='-'))
             elif "Missing critical base data" not in ai_message_display and "Not Calculated" not in ai_message_display :
-                st.info("Site-level AI forecast not available or sites not defined/active.")
+                st.info("Site-level Auto forecast not available or sites not defined/active.")
         else:
-            st.caption("Click the button above to generate the AI forecast based on your goals.")
+            st.caption("Click the button above to generate the Auto forecast based on your goals.")
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
