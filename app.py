@@ -2209,11 +2209,12 @@ if st.session_state.data_processed_successfully:
             except Exception as e_dl_site3: st.warning(f"Site projection (Tab 3) download error: {e_dl_site3}")
         else: st.info("Site-level projection data (Projections Tab) is not available or is empty.")
 
-    # --- NEW: FUNNEL ANALYSIS TAB ---
+   # --- NEW: FUNNEL ANALYSIS TAB ---
     with tab_funnel_analysis:
         render_funnel_analysis_tab()
 
-        with tab_ai_forecast:
+    # --- CORRECTED: Auto Forecast tab is now at the same level ---
+    with tab_ai_forecast:
         st.header("🤖 Auto Forecast (Goal-Based)") # <<< RENAMED
         st.info("""
         Define your recruitment goals. The tool will estimate a monthly plan using a 'frontloading' strategy
@@ -2576,4 +2577,3 @@ if st.session_state.data_processed_successfully:
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
-               
